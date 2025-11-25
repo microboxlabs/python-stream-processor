@@ -1,0 +1,96 @@
+"""
+Configuration management for the stream processor.
+Uses pydantic-settings for environment variable loading with validation.
+"""
+
+from functools import lru_cache
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class PulsarConfig(BaseSettings):
+    """Pulsar connection configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="PULSAR_")
+
+    service_url: str = Field(default="pulsar://localhost:6650", description="Pulsar broker URL")
+    topic: str = Field(
+        default="persistent://streamhub/v1/frames", description="Topic to consume from"
+    )
+    subscription: str = Field(default="stream-processor", description="Subscription name")
+    consumer_name: str = Field(default="stream-processor-consumer", description="Consumer name")
+
+
+class StorageConfig(BaseSettings):
+    """Shared storage configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="STORAGE_")
+
+    base_path: str = Field(default="/mnt/streamhub", description="Base storage path")
+    frames_path: str = Field(default="/mnt/streamhub/frames", description="Frames storage path")
+    hls_path: str = Field(default="/mnt/streamhub/hls", description="HLS output path")
+
+
+class ProcessingConfig(BaseSettings):
+    """Video processing configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="PROCESSING_")
+
+    max_workers: int = Field(default=50, description="Max concurrent FFmpeg workers")
+    segment_duration_seconds: int = Field(default=30, description="HLS segment duration")
+    frames_per_segment: int = Field(default=6, description="Frames per segment (at 5s intervals)")
+    retention_hours: int = Field(default=24, description="Hours of video to retain")
+    frame_interval_seconds: int = Field(default=5, description="Expected interval between frames")
+    output_framerate: int = Field(default=1, description="Output video framerate")
+    video_width: int = Field(default=1920, description="Output video width")
+
+
+class RedisConfig(BaseSettings):
+    """Redis configuration for distributed state."""
+
+    model_config = SettingsConfigDict(env_prefix="REDIS_")
+
+    url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
+    enabled: bool = Field(default=False, description="Enable Redis for distributed state")
+
+
+class MetricsConfig(BaseSettings):
+    """Prometheus metrics configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="METRICS_")
+
+    port: int = Field(default=9090, description="Metrics server port")
+    enabled: bool = Field(default=True, description="Enable metrics endpoint")
+
+
+class Settings(BaseSettings):
+    """Application settings container."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    pulsar: PulsarConfig = Field(default_factory=PulsarConfig)
+    storage: StorageConfig = Field(default_factory=StorageConfig)
+    processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+
+    # Convenience properties
+    @property
+    def segments_per_24h(self) -> int:
+        """Calculate number of segments in 24 hours."""
+        return (self.processing.retention_hours * 3600) // self.processing.segment_duration_seconds
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Get cached settings instance."""
+    return Settings()
+
+
+# Global settings instance
+settings = get_settings()
+
