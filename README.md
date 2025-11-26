@@ -54,12 +54,15 @@ This service consumes frame events from Apache Pulsar and generates HLS (HTTP Li
                           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    SHARED FILESYSTEM                             │
-│  /streamhub/                                                     │
-│  ├── frames/{deviceId}/{timestamp}.jpg   # Source frames        │
-│  └── hls/{deviceId}/                      # Generated HLS        │
-│      ├── playlist.m3u8                    # Rolling playlist    │
-│      └── segments/                        # Video segments       │
-│          └── seg_{NNNNNN}.ts                                     │
+│  /storage/streams/                                               │
+│  └── client_ids/{clientId}/                                      │
+│      └── device_id/{deviceId}/                                   │
+│          ├── frames/                      # Source frames        │
+│          │   └── {eventId}.jpg                                   │
+│          └── hls/                         # Generated HLS        │
+│              ├── playlist.m3u8            # Rolling playlist     │
+│              └── segments/                # Video segments       │
+│                  └── seg_{NNNNNN}.ts                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -90,19 +93,18 @@ Create a `.env` file:
 ```env
 # Pulsar Configuration
 PULSAR_SERVICE_URL=pulsar://localhost:6650
-PULSAR_TOPIC=persistent://streamhub/v1/frames
+PULSAR_TOPIC=persistent://streamhub/stream/frames
 PULSAR_SUBSCRIPTION=stream-processor
 
 # Storage Configuration
-STORAGE_BASE_PATH=/mnt/streamhub
-FRAMES_PATH=/mnt/streamhub/frames
-HLS_PATH=/mnt/streamhub/hls
+# Directory structure: {base_path}/client_ids/{client_id}/device_id/{device_id}/frames|hls/
+STORAGE_BASE_PATH=/storage/streams
 
 # Processing Configuration
-MAX_WORKERS=50
-SEGMENT_DURATION_SECONDS=30
-FRAMES_PER_SEGMENT=6
-RETENTION_HOURS=24
+PROCESSING_MAX_WORKERS=50
+PROCESSING_SEGMENT_DURATION_SECONDS=30
+PROCESSING_FRAMES_PER_SEGMENT=6
+PROCESSING_RETENTION_HOURS=24
 
 # Redis Configuration (optional)
 REDIS_URL=redis://localhost:6379
@@ -167,15 +169,15 @@ Expected Pulsar message format:
 ```json
 {
   "eventId": "uuid-v4",
+  "clientId": "client-abc",
   "deviceId": "device-001",
   "timestamp": "2025-11-25T10:30:00Z",
-  "framePath": "/streamhub/frames/device-001/1732528200000.jpg",
-  "metadata": {
-    "licensePlate": "ABC123",
-    "location": {
-      "lat": -33.4489,
-      "lon": -70.6693
-    }
+  "framePath": "/storage/streams/client_ids/client-abc/device_id/device-001/frames/uuid-v4.jpg",
+  "requestId": "request-uuid",
+  "secondaryKey": "optional-secondary-key",
+  "location": {
+    "lat": -33.4489,
+    "lon": -70.6693
   }
 }
 ```

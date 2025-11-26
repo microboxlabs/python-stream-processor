@@ -10,14 +10,14 @@ import structlog
 
 def configure_logging() -> None:
     """Configure structlog with console output."""
-    
+
     # Configure standard logging
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
         level=logging.INFO,
     )
-    
+
     # Configure structlog
     structlog.configure(
         processors=[
@@ -42,10 +42,10 @@ configure_logging()
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     """
     Get a structured logger instance.
-    
+
     Args:
         name: Logger name (usually __name__)
-        
+
     Returns:
         Configured structlog logger
     """

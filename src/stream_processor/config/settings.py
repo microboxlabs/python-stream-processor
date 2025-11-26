@@ -4,6 +4,7 @@ Uses pydantic-settings for environment variable loading with validation.
 """
 
 from functools import lru_cache
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,7 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class PulsarConfig(BaseSettings):
     """Pulsar connection configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="PULSAR_")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="PULSAR_", extra="ignore")
 
     service_url: str = Field(default="pulsar://localhost:6650", description="Pulsar broker URL")
     topic: str = Field(
@@ -24,7 +25,7 @@ class PulsarConfig(BaseSettings):
 class StorageConfig(BaseSettings):
     """Shared storage configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="STORAGE_")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="STORAGE_", extra="ignore")
 
     base_path: str = Field(default="/storage/streams", description="Base storage path")
     # Directory structure:
@@ -32,13 +33,12 @@ class StorageConfig(BaseSettings):
     # {base_path}/client_ids/{client_id}/device_id/{device_id}/hls/     <- HLS output
     # {base_path}/client_ids/{client_id}/request_id/{request_id}        -> symlink to ../device_id/{device_id}/frames
     # {base_path}/client_ids/{client_id}/secondary_key/{key}            -> symlink to ../device_id/{device_id}/frames
-    hls_path: str = Field(default="/storage/streams", description="HLS output base path")
 
 
 class ProcessingConfig(BaseSettings):
     """Video processing configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="PROCESSING_")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="PROCESSING_", extra="ignore")
 
     max_workers: int = Field(default=50, description="Max concurrent FFmpeg workers")
     segment_duration_seconds: int = Field(default=30, description="HLS segment duration")
@@ -52,7 +52,7 @@ class ProcessingConfig(BaseSettings):
 class RedisConfig(BaseSettings):
     """Redis configuration for distributed state."""
 
-    model_config = SettingsConfigDict(env_prefix="REDIS_")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="REDIS_", extra="ignore")
 
     url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
     enabled: bool = Field(default=False, description="Enable Redis for distributed state")
@@ -61,7 +61,7 @@ class RedisConfig(BaseSettings):
 class MetricsConfig(BaseSettings):
     """Prometheus metrics configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="METRICS_")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="METRICS_", extra="ignore")
 
     port: int = Field(default=9090, description="Metrics server port")
     enabled: bool = Field(default=True, description="Enable metrics endpoint")

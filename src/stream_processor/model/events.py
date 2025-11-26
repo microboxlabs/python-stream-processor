@@ -3,7 +3,7 @@ Event models for stream processing.
 """
 
 from datetime import datetime
-from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -23,8 +23,8 @@ class FrameEvent(BaseModel):
     timestamp: datetime = Field(description="Frame capture timestamp")
     frame_path: str = Field(alias="framePath", description="Path to frame image on shared storage")
     request_id: str = Field(alias="requestId", description="Request identifier for tracking")
-    secondary_key: Optional[str] = Field(default=None, alias="secondaryKey", description="Secondary index key")
-    location: Optional[LocationData] = None
+    secondary_key: str | None = Field(default=None, alias="secondaryKey", description="Secondary index key")
+    location: LocationData | None = None
 
     class Config:
         populate_by_name = True
@@ -36,8 +36,8 @@ class DeviceState(BaseModel):
     client_id: str = Field(description="Client identifier")
     device_id: str = Field(description="Device identifier")
     frame_count: int = Field(default=0, description="Accumulated frames since last segment")
-    last_frame_time: Optional[datetime] = Field(default=None, description="Last frame timestamp")
-    last_segment_time: Optional[datetime] = Field(
+    last_frame_time: datetime | None = Field(default=None, description="Last frame timestamp")
+    last_segment_time: datetime | None = Field(
         default=None, description="Last segment generation time"
     )
     current_segment_number: int = Field(default=0, description="Current segment number")
@@ -69,7 +69,7 @@ class DeviceState(BaseModel):
     def should_generate_segment(self, frames_per_segment: int, max_wait_seconds: int = 60) -> bool:
         """
         Determine if a segment should be generated.
-        
+
         Triggers on:
         1. Accumulated frames >= frames_per_segment
         2. OR time since last segment > max_wait_seconds (with at least 1 frame)

@@ -1,6 +1,6 @@
 """Data models module."""
 
-from .events import FrameEvent, DeviceState
+from .events import DeviceState, FrameEvent
 
 __all__ = ["FrameEvent", "DeviceState"]
 

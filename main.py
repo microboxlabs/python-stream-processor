@@ -5,10 +5,10 @@ This service consumes frame events from Pulsar and generates HLS live streams
 with 24-hour rolling windows per device.
 """
 
-import sys
-import os
 import asyncio
+import os
 import signal
+import sys
 
 # Add src directory to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -24,11 +24,11 @@ logger = get_logger(__name__)
 async def shutdown(signal_received, consumer: StreamProcessorConsumer, cleanup: CleanupService):
     """Handle graceful shutdown."""
     logger.info(f"Received exit signal {signal_received.name}...")
-    
+
     # Stop services
     await consumer.stop()
     await cleanup.stop()
-    
+
     logger.info("Shutdown complete")
 
 
@@ -37,14 +37,14 @@ async def main_async():
     logger.info("=" * 80)
     logger.info("Stream Processor - HLS Live Stream Generator")
     logger.info("=" * 80)
-    
+
     # Start metrics server
     start_metrics_server()
-    
+
     # Initialize services
     consumer = StreamProcessorConsumer()
     cleanup = CleanupService()
-    
+
     # Setup signal handlers
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -52,10 +52,10 @@ async def main_async():
             sig,
             lambda s=sig: asyncio.create_task(shutdown(s, consumer, cleanup))
         )
-    
+
     # Start services
     logger.info("Starting services...")
-    
+
     try:
         await asyncio.gather(
             consumer.run(),

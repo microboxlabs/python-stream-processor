@@ -63,9 +63,9 @@ def start_metrics_server() -> None:
     if not settings.metrics.enabled:
         logger.info("Metrics server disabled")
         return
-    
+
     port = settings.metrics.port
-    
+
     try:
         start_http_server(port)
         logger.info(f"Metrics server started on port {port}")
