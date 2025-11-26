@@ -2,9 +2,9 @@
 Event models for stream processing.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class LocationData(BaseModel):
@@ -17,6 +17,8 @@ class LocationData(BaseModel):
 class FrameEvent(BaseModel):
     """Frame event from Pulsar topic."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     event_id: str = Field(alias="eventId", description="Unique event identifier")
     client_id: str = Field(alias="clientId", description="Client identifier (from JWT)")
     device_id: str = Field(alias="deviceId", description="Device identifier")
@@ -27,9 +29,6 @@ class FrameEvent(BaseModel):
         default=None, alias="secondaryKey", description="Secondary index key"
     )
     location: LocationData | None = None
-
-    class Config:
-        populate_by_name = True
 
 
 class DeviceState(BaseModel):
@@ -63,7 +62,7 @@ class DeviceState(BaseModel):
         self.pending_frames = []
         self.frame_count = 0
         self.current_segment_number += 1
-        self.last_segment_time = datetime.utcnow()
+        self.last_segment_time = datetime.now(UTC)
         return frames
 
     def should_generate_segment(self, frames_per_segment: int, max_wait_seconds: int = 60) -> bool:
@@ -78,7 +77,7 @@ class DeviceState(BaseModel):
             return True
 
         if self.frame_count > 0 and self.last_segment_time:
-            elapsed = (datetime.utcnow() - self.last_segment_time).total_seconds()
+            elapsed = (datetime.now(UTC) - self.last_segment_time).total_seconds()
             if elapsed > max_wait_seconds:
                 return True
 

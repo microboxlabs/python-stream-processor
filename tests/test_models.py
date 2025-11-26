@@ -1,10 +1,8 @@
 """Tests for data models."""
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-import pytest
-
-from stream_processor.model.events import FrameEvent, DeviceState
+from stream_processor.model.events import DeviceState, FrameEvent
 
 
 class TestFrameEvent:
@@ -14,36 +12,43 @@ class TestFrameEvent:
         """Test parsing FrameEvent from dictionary."""
         data = {
             "eventId": "test-event-001",
+            "clientId": "client-001",
             "deviceId": "device-001",
             "timestamp": "2025-11-25T10:30:00Z",
             "framePath": "/streamhub/frames/device-001/1732528200000.jpg",
-            "metadata": {
-                "licensePlate": "ABC123",
-                "location": {"lat": -33.4489, "lon": -70.6693},
-            },
+            "requestId": "request-001",
+            "secondaryKey": "ABC123",
+            "location": {"lat": -33.4489, "lon": -70.6693},
         }
 
         event = FrameEvent.model_validate(data)
 
         assert event.event_id == "test-event-001"
+        assert event.client_id == "client-001"
         assert event.device_id == "device-001"
         assert event.frame_path == "/streamhub/frames/device-001/1732528200000.jpg"
-        assert event.metadata.license_plate == "ABC123"
-        assert event.metadata.location.lat == -33.4489
+        assert event.request_id == "request-001"
+        assert event.secondary_key == "ABC123"
+        assert event.location is not None
+        assert event.location.lat == -33.4489
 
     def test_parse_minimal_event(self):
         """Test parsing minimal FrameEvent without optional fields."""
         data = {
             "eventId": "test-event-002",
+            "clientId": "client-002",
             "deviceId": "device-002",
             "timestamp": "2025-11-25T10:30:00Z",
             "framePath": "/streamhub/frames/device-002/1732528200000.jpg",
+            "requestId": "request-002",
         }
 
         event = FrameEvent.model_validate(data)
 
         assert event.event_id == "test-event-002"
-        assert event.metadata is None
+        assert event.client_id == "client-002"
+        assert event.secondary_key is None
+        assert event.location is None
 
 
 class TestDeviceState:
@@ -51,8 +56,8 @@ class TestDeviceState:
 
     def test_add_frame(self):
         """Test adding frames to device state."""
-        state = DeviceState(device_id="test-device")
-        now = datetime.utcnow()
+        state = DeviceState(client_id="test-client", device_id="test-device")
+        now = datetime.now(UTC)
 
         state.add_frame("/path/to/frame1.jpg", now)
         state.add_frame("/path/to/frame2.jpg", now)
@@ -63,8 +68,8 @@ class TestDeviceState:
 
     def test_clear_pending_frames(self):
         """Test clearing pending frames after segment generation."""
-        state = DeviceState(device_id="test-device")
-        now = datetime.utcnow()
+        state = DeviceState(client_id="test-client", device_id="test-device")
+        now = datetime.now(UTC)
 
         state.add_frame("/path/to/frame1.jpg", now)
         state.add_frame("/path/to/frame2.jpg", now)
@@ -78,8 +83,8 @@ class TestDeviceState:
 
     def test_should_generate_segment_by_count(self):
         """Test segment generation trigger by frame count."""
-        state = DeviceState(device_id="test-device")
-        now = datetime.utcnow()
+        state = DeviceState(client_id="test-client", device_id="test-device")
+        now = datetime.now(UTC)
 
         # Add 5 frames (less than threshold of 6)
         for i in range(5):
@@ -94,8 +99,8 @@ class TestDeviceState:
 
     def test_should_generate_segment_by_time(self):
         """Test segment generation trigger by time threshold."""
-        state = DeviceState(device_id="test-device")
-        now = datetime.utcnow()
+        state = DeviceState(client_id="test-client", device_id="test-device")
+        now = datetime.now(UTC)
 
         # Set last segment time to 70 seconds ago
         state.last_segment_time = now - timedelta(seconds=70)
@@ -106,9 +111,13 @@ class TestDeviceState:
 
     def test_should_not_generate_empty_segment(self):
         """Test that empty segments are not generated."""
-        state = DeviceState(device_id="test-device")
-        state.last_segment_time = datetime.utcnow() - timedelta(seconds=120)
+        state = DeviceState(client_id="test-client", device_id="test-device")
+        state.last_segment_time = datetime.now(UTC) - timedelta(seconds=120)
 
         # No frames, should not generate even if time threshold passed
         assert not state.should_generate_segment(frames_per_segment=6, max_wait_seconds=60)
 
+    def test_state_key(self):
+        """Test state_key property."""
+        state = DeviceState(client_id="test-client", device_id="test-device")
+        assert state.state_key == "test-client:test-device"

@@ -31,10 +31,9 @@ def temp_storage_path(tmp_path):
     hls_path = tmp_path / "hls"
     frames_path.mkdir()
     hls_path.mkdir()
-    
+
     return {
         "base": str(tmp_path),
         "frames": str(frames_path),
         "hls": str(hls_path),
     }
-
