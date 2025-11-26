@@ -15,7 +15,7 @@ class PulsarConfig(BaseSettings):
 
     service_url: str = Field(default="pulsar://localhost:6650", description="Pulsar broker URL")
     topic: str = Field(
-        default="persistent://streamhub/v1/frames", description="Topic to consume from"
+        default="persistent://streamhub/stream/frames", description="Topic to consume from"
     )
     subscription: str = Field(default="stream-processor", description="Subscription name")
     consumer_name: str = Field(default="stream-processor-consumer", description="Consumer name")
@@ -26,9 +26,13 @@ class StorageConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="STORAGE_")
 
-    base_path: str = Field(default="/mnt/streamhub", description="Base storage path")
-    frames_path: str = Field(default="/mnt/streamhub/frames", description="Frames storage path")
-    hls_path: str = Field(default="/mnt/streamhub/hls", description="HLS output path")
+    base_path: str = Field(default="/storage/streams", description="Base storage path")
+    # Directory structure:
+    # {base_path}/client_ids/{client_id}/device_id/{device_id}/frames/  <- actual frames
+    # {base_path}/client_ids/{client_id}/device_id/{device_id}/hls/     <- HLS output
+    # {base_path}/client_ids/{client_id}/request_id/{request_id}        -> symlink to ../device_id/{device_id}/frames
+    # {base_path}/client_ids/{client_id}/secondary_key/{key}            -> symlink to ../device_id/{device_id}/frames
+    hls_path: str = Field(default="/storage/streams", description="HLS output base path")
 
 
 class ProcessingConfig(BaseSettings):

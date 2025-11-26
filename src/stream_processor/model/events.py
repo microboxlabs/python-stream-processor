@@ -14,21 +14,17 @@ class LocationData(BaseModel):
     lon: float = Field(description="Longitude")
 
 
-class EventMetadata(BaseModel):
-    """Event metadata."""
-
-    license_plate: Optional[str] = Field(default=None, alias="licensePlate")
-    location: Optional[LocationData] = None
-
-
 class FrameEvent(BaseModel):
     """Frame event from Pulsar topic."""
 
     event_id: str = Field(alias="eventId", description="Unique event identifier")
+    client_id: str = Field(alias="clientId", description="Client identifier (from JWT)")
     device_id: str = Field(alias="deviceId", description="Device identifier")
     timestamp: datetime = Field(description="Frame capture timestamp")
     frame_path: str = Field(alias="framePath", description="Path to frame image on shared storage")
-    metadata: Optional[EventMetadata] = None
+    request_id: str = Field(alias="requestId", description="Request identifier for tracking")
+    secondary_key: Optional[str] = Field(default=None, alias="secondaryKey", description="Secondary index key")
+    location: Optional[LocationData] = None
 
     class Config:
         populate_by_name = True
@@ -37,6 +33,7 @@ class FrameEvent(BaseModel):
 class DeviceState(BaseModel):
     """State tracking for a device's stream processing."""
 
+    client_id: str = Field(description="Client identifier")
     device_id: str = Field(description="Device identifier")
     frame_count: int = Field(default=0, description="Accumulated frames since last segment")
     last_frame_time: Optional[datetime] = Field(default=None, description="Last frame timestamp")
@@ -48,6 +45,11 @@ class DeviceState(BaseModel):
         default_factory=list, description="Paths to pending frames"
     )
     is_active: bool = Field(default=True, description="Whether device is actively streaming")
+
+    @property
+    def state_key(self) -> str:
+        """Unique key for this client/device combination."""
+        return f"{self.client_id}:{self.device_id}"
 
     def add_frame(self, frame_path: str, timestamp: datetime) -> None:
         """Add a frame to pending frames."""
