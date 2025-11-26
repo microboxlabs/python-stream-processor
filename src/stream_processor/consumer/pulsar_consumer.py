@@ -43,8 +43,7 @@ class StreamProcessorConsumer:
 
         # Thread pool for FFmpeg workers
         self.executor = ThreadPoolExecutor(
-            max_workers=self.processing_config.max_workers,
-            thread_name_prefix="ffmpeg-worker-"
+            max_workers=self.processing_config.max_workers, thread_name_prefix="ffmpeg-worker-"
         )
 
         # Pulsar client and consumer (initialized on run)
@@ -89,14 +88,13 @@ class StreamProcessorConsumer:
             frames_received_total.labels(device_id=state_key).inc()
 
             logger.debug(
-                f"Frame received for {state_key}: {event.frame_path} "
-                f"(pending: {state.frame_count})"
+                f"Frame received for {state_key}: {event.frame_path} (pending: {state.frame_count})"
             )
 
             # Check if we should generate a segment
             if state.should_generate_segment(
                 self.processing_config.frames_per_segment,
-                max_wait_seconds=self.processing_config.segment_duration_seconds
+                max_wait_seconds=self.processing_config.segment_duration_seconds,
             ):
                 await self._generate_segment(state)
 
@@ -112,10 +110,7 @@ class StreamProcessorConsumer:
             logger.warning(f"No frames to process for {state_key}")
             return
 
-        logger.info(
-            f"Generating segment {segment_number} for {state_key} "
-            f"({len(frames)} frames)"
-        )
+        logger.info(f"Generating segment {segment_number} for {state_key} ({len(frames)} frames)")
 
         try:
             # Run FFmpeg in thread pool
@@ -174,14 +169,14 @@ class StreamProcessorConsumer:
             for state_key, state in list(self.device_states.items()):
                 if state.should_generate_segment(
                     self.processing_config.frames_per_segment,
-                    max_wait_seconds=self.processing_config.segment_duration_seconds
+                    max_wait_seconds=self.processing_config.segment_duration_seconds,
                 ):
                     lock = self._get_device_lock(state_key)
                     if not lock.locked():
                         async with lock:
                             if state.should_generate_segment(
                                 self.processing_config.frames_per_segment,
-                                max_wait_seconds=self.processing_config.segment_duration_seconds
+                                max_wait_seconds=self.processing_config.segment_duration_seconds,
                             ):
                                 await self._generate_segment(state)
 
@@ -279,4 +274,3 @@ class StreamProcessorConsumer:
                 logger.error(f"Error closing client: {e}")
 
         logger.info("Consumer stopped")
-

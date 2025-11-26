@@ -23,7 +23,9 @@ class FrameEvent(BaseModel):
     timestamp: datetime = Field(description="Frame capture timestamp")
     frame_path: str = Field(alias="framePath", description="Path to frame image on shared storage")
     request_id: str = Field(alias="requestId", description="Request identifier for tracking")
-    secondary_key: str | None = Field(default=None, alias="secondaryKey", description="Secondary index key")
+    secondary_key: str | None = Field(
+        default=None, alias="secondaryKey", description="Secondary index key"
+    )
     location: LocationData | None = None
 
     class Config:
@@ -41,9 +43,7 @@ class DeviceState(BaseModel):
         default=None, description="Last segment generation time"
     )
     current_segment_number: int = Field(default=0, description="Current segment number")
-    pending_frames: list[str] = Field(
-        default_factory=list, description="Paths to pending frames"
-    )
+    pending_frames: list[str] = Field(default_factory=list, description="Paths to pending frames")
     is_active: bool = Field(default=True, description="Whether device is actively streaming")
 
     @property
@@ -83,4 +83,3 @@ class DeviceState(BaseModel):
                 return True
 
         return False
-

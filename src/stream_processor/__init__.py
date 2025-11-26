@@ -6,4 +6,3 @@ and generating HLS video streams with 24-hour rolling windows.
 """
 
 __version__ = "0.1.0"
-

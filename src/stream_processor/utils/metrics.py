@@ -71,4 +71,3 @@ def start_metrics_server() -> None:
         logger.info(f"Metrics server started on port {port}")
     except Exception as e:
         logger.error(f"Failed to start metrics server: {e}")
-

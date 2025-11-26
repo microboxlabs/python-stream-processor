@@ -197,4 +197,3 @@ class CleanupService:
 
         if deleted_count > 0:
             logger.debug(f"Cleaned up {deleted_count} old source frames")
-

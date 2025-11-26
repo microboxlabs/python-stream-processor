@@ -38,8 +38,12 @@ class HLSGenerator:
         Path structure: {base_path}/client_ids/{client_id}/device_id/{device_id}/hls/
         """
         device_path = (
-            Path(self.storage.base_path) / "client_ids" / client_id /
-            "device_id" / device_id / "hls"
+            Path(self.storage.base_path)
+            / "client_ids"
+            / client_id
+            / "device_id"
+            / device_id
+            / "hls"
         )
         device_path.mkdir(parents=True, exist_ok=True)
 
@@ -58,7 +62,7 @@ class HLSGenerator:
         fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="ffmpeg_input_")
 
         try:
-            with os.fdopen(fd, 'w') as f:
+            with os.fdopen(fd, "w") as f:
                 for frame_path in sorted(frames):
                     # Each frame should display for frame_interval_seconds
                     f.write(f"file '{frame_path}'\n")
@@ -94,6 +98,7 @@ class HLSGenerator:
             Path to generated segment file
         """
         import time
+
         start_time = time.time()
 
         device_path = self._get_device_hls_path(client_id, device_id)
@@ -112,22 +117,35 @@ class HLSGenerator:
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",  # Overwrite output
-                "-f", "concat",
-                "-safe", "0",
-                "-i", input_list_path,
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                input_list_path,
                 # Video encoding
-                "-c:v", "libx264",
-                "-preset", "ultrafast",  # Fast encoding for real-time
-                "-tune", "zerolatency",
-                "-profile:v", "baseline",  # Maximum compatibility
-                "-level", "3.0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",  # Fast encoding for real-time
+                "-tune",
+                "zerolatency",
+                "-profile:v",
+                "baseline",  # Maximum compatibility
+                "-level",
+                "3.0",
                 # Video settings
-                "-vf", f"scale={self.config.video_width}:-2",  # Scale to width, keep aspect
-                "-pix_fmt", "yuv420p",
-                "-r", str(self.config.output_framerate),  # Output framerate
+                "-vf",
+                f"scale={self.config.video_width}:-2",  # Scale to width, keep aspect
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                str(self.config.output_framerate),  # Output framerate
                 # MPEG-TS output
-                "-f", "mpegts",
-                "-mpegts_copyts", "1",
+                "-f",
+                "mpegts",
+                "-mpegts_copyts",
+                "1",
                 str(segment_path),
             ]
 
@@ -154,8 +172,7 @@ class HLSGenerator:
             ffmpeg_duration_histogram.labels(device_id=device_id).observe(duration)
 
             logger.info(
-                f"Segment generated: {segment_filename} "
-                f"({segment_size} bytes, {duration:.2f}s)"
+                f"Segment generated: {segment_filename} ({segment_size} bytes, {duration:.2f}s)"
             )
 
             # Update playlist
@@ -227,7 +244,9 @@ class HLSGenerator:
         temp_path.write_text(playlist_content)
         temp_path.rename(playlist_path)
 
-        logger.debug(f"Playlist updated for {device_id}: {current_segment - oldest_segment + 1} segments")
+        logger.debug(
+            f"Playlist updated for {device_id}: {current_segment - oldest_segment + 1} segments"
+        )
 
     def get_playlist_path(self, client_id: str, device_id: str) -> Path:
         """Get the playlist path for a client/device."""
@@ -236,4 +255,3 @@ class HLSGenerator:
     def get_segment_path(self, client_id: str, device_id: str, segment_filename: str) -> Path:
         """Get a segment file path for a client/device."""
         return self._get_device_hls_path(client_id, device_id) / "segments" / segment_filename
-

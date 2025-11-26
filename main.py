@@ -49,8 +49,7 @@ async def main_async():
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(
-            sig,
-            lambda s=sig: asyncio.create_task(shutdown(s, consumer, cleanup))
+            sig, lambda s=sig: asyncio.create_task(shutdown(s, consumer, cleanup))
         )
 
     # Start services
@@ -81,4 +80,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
