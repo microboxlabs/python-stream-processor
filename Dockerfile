@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy project files
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src ./src
 COPY main.py ./
 
@@ -56,12 +56,11 @@ ENV PYTHONUNBUFFERED=1
 
 # Environment variables (can be overridden at runtime)
 ENV PULSAR_SERVICE_URL=pulsar://pulsar:6650
-ENV PULSAR_TOPIC=persistent://streamhub/v1/frames
+ENV PULSAR_TOPIC=persistent://streamhub/stream/frames
 ENV PULSAR_SUBSCRIPTION=stream-processor
 
-ENV STORAGE_BASE_PATH=/mnt/streamhub
-ENV STORAGE_FRAMES_PATH=/mnt/streamhub/frames
-ENV STORAGE_HLS_PATH=/mnt/streamhub/hls
+# Storage: {base_path}/client_ids/{client_id}/device_id/{device_id}/frames|hls/
+ENV STORAGE_BASE_PATH=/mnt/streamhub/streams
 
 ENV PROCESSING_MAX_WORKERS=50
 ENV PROCESSING_SEGMENT_DURATION_SECONDS=30
@@ -71,8 +70,8 @@ ENV PROCESSING_RETENTION_HOURS=24
 ENV METRICS_PORT=9090
 ENV METRICS_ENABLED=true
 
-# Create directories
-RUN mkdir -p /mnt/streamhub/frames /mnt/streamhub/hls
+# Create base storage directory
+RUN mkdir -p /mnt/streamhub/streams
 
 # Expose metrics port
 EXPOSE 9090
