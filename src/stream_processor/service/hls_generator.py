@@ -87,7 +87,7 @@ class HLSGenerator:
         device_id: str,
         frames: list[str],
         segment_number: int,
-    ) -> str:
+    ) -> str | None:
         """
         Generate a single HLS segment from frames.
 
@@ -98,7 +98,7 @@ class HLSGenerator:
             segment_number: Segment sequence number
 
         Returns:
-            Path to generated segment file
+            Path to generated segment file, or None if frames are missing
         """
         import time
 
@@ -109,6 +109,17 @@ class HLSGenerator:
         segment_path = device_path / "segments" / segment_filename
 
         logger.info(f"Generating segment {segment_filename} for {device_id}")
+        logger.info(f"Path: {segment_path}")
+
+        # Validate all frame paths exist before processing
+        missing_frames = [frame for frame in frames if not Path(frame).exists()]
+        if missing_frames:
+            logger.debug(
+                f"Skipping segment generation for {device_id}: "
+                f"{len(missing_frames)}/{len(frames)} frames missing"
+            )
+            return None
+
         logger.debug(f"Input frames: {len(frames)}")
 
         # Create input file list

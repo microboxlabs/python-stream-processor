@@ -124,10 +124,13 @@ class StreamProcessorConsumer:
                 segment_number,
             )
 
-            # Clear pending frames after successful generation
+            # Clear pending frames (even if generation was skipped)
             state.clear_pending_frames()
 
-            logger.info(f"Segment generated: {segment_path}")
+            if segment_path:
+                logger.info(f"Segment generated: {segment_path}")
+            else:
+                logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 
         except Exception as e:
             processing_errors_total.labels(device_id=state_key, error_type="ffmpeg").inc()
