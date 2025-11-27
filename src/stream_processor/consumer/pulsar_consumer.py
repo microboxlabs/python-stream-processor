@@ -58,9 +58,17 @@ class StreamProcessorConsumer:
         """Get or create device state using client_id:device_id key."""
         state_key = f"{client_id}:{device_id}"
         if state_key not in self.device_states:
-            self.device_states[state_key] = DeviceState(client_id=client_id, device_id=device_id)
+            # Check for existing segments to resume numbering
+            highest_segment = self.hls_generator.get_highest_segment_number(client_id, device_id)
+            initial_segment = highest_segment + 1 if highest_segment >= 0 else 0
+
+            self.device_states[state_key] = DeviceState(
+                client_id=client_id,
+                device_id=device_id,
+                current_segment_number=initial_segment,
+            )
             active_devices_gauge.inc()
-            logger.info(f"New device registered: {state_key}")
+            logger.info(f"New device registered: {state_key} (starting at segment {initial_segment})")
         return self.device_states[state_key]
 
     def _get_device_lock(self, state_key: str) -> asyncio.Lock:

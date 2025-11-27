@@ -55,6 +55,46 @@ class HLSGenerator:
 
         return device_path
 
+    def get_highest_segment_number(self, client_id: str, device_id: str) -> int:
+        """
+        Find the highest existing segment number by checking the most recent segment file.
+
+        Used to resume segment numbering after restart.
+
+        Returns:
+            Highest segment number found, or -1 if no segments exist
+        """
+        import re
+
+        device_path = self._get_device_hls_path(client_id, device_id)
+        segments_path = device_path / "segments"
+
+        if not segments_path.exists():
+            return -1
+
+        # Get all segment files using glob
+        segment_files = list(segments_path.glob("seg_*.ts"))
+
+        if not segment_files:
+            return -1
+
+        # Find the most recently modified segment file
+        latest_file = max(segment_files, key=lambda f: f.stat().st_mtime)
+
+        # Extract segment number from filename: seg_000123.ts -> 123
+        match = re.search(r"seg_(\d+)\.ts$", latest_file.name)
+        if not match:
+            return -1
+
+        highest = int(match.group(1))
+
+        logger.info(
+            f"Found existing segments for {client_id}:{device_id}, "
+            f"latest: {latest_file.name}, resuming from segment {highest + 1}"
+        )
+
+        return highest
+
     def _create_input_file_list(self, frames: list[str]) -> str:
         """
         Create FFmpeg input file list for concat demuxer.
