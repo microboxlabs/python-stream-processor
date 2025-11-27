@@ -12,6 +12,7 @@ from pathlib import Path
 from ..config.settings import settings
 from ..utils.logger import get_logger
 from ..utils.metrics import ffmpeg_duration_histogram, segments_generated_total
+from ..utils.path import sanitize_path_component
 
 logger = get_logger(__name__)
 
@@ -37,12 +38,14 @@ class HLSGenerator:
 
         Path structure: {base_path}/client_ids/{client_id}/device_id/{device_id}/hls/
         """
+        safe_client_id = sanitize_path_component(client_id)
+        safe_device_id = sanitize_path_component(device_id)
         device_path = (
             Path(self.storage.base_path)
             / "client_ids"
-            / client_id
+            / safe_client_id
             / "device_id"
-            / device_id
+            / safe_device_id
             / "hls"
         )
         device_path.mkdir(parents=True, exist_ok=True)
