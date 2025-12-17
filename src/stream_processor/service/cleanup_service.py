@@ -2,16 +2,17 @@
 Cleanup Service
 
 Removes old HLS segments beyond the retention window (24 hours default).
+Supports both filesystem and GCS storage backends.
 """
 
 import asyncio
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from ..config.settings import settings
 from ..utils.logger import get_logger
 from ..utils.metrics import cleanup_duration_histogram, segments_deleted_total
+from .storage_backend import StorageBackend, create_storage_backend
 
 logger = get_logger(__name__)
 
@@ -21,16 +22,35 @@ class CleanupService:
     Background service for cleaning up old HLS segments.
 
     Runs periodically to remove segments older than retention_hours.
+    Supports both filesystem and GCS storage backends.
     """
 
-    def __init__(self):
-        """Initialize the cleanup service."""
-        self.storage = settings.storage
+    def __init__(self, storage: StorageBackend | None = None):
+        """
+        Initialize the cleanup service.
+
+        Args:
+            storage: Optional storage backend. If not provided, creates one from settings.
+        """
+        self.storage_config = settings.storage
         self.retention_hours = settings.processing.retention_hours
         self.running = False
 
+        # Initialize storage backend
+        if storage is not None:
+            self.storage = storage
+        else:
+            self.storage = create_storage_backend(
+                storage_type=self.storage_config.type,
+                base_path=self.storage_config.base_path,
+                gcs_bucket=self.storage_config.gcs_bucket,
+                gcs_project_id=self.storage_config.gcs_project_id,
+            )
+
         # Run cleanup every 5 minutes
         self.cleanup_interval_seconds = 300
+
+        logger.info(f"Cleanup Service using {self.storage.get_storage_type()} storage backend")
 
     async def run(self) -> None:
         """
@@ -42,6 +62,7 @@ class CleanupService:
         logger.info("Cleanup Service Started")
         logger.info(f"Retention: {self.retention_hours} hours")
         logger.info(f"Interval: {self.cleanup_interval_seconds} seconds")
+        logger.info(f"Storage: {self.storage.get_storage_type()}")
         logger.info("=" * 80)
 
         self.running = True
@@ -70,12 +91,6 @@ class CleanupService:
         """
         start_time = time.time()
 
-        base_path = Path(self.storage.base_path)
-        client_ids_path = base_path / "client_ids"
-
-        if not client_ids_path.exists():
-            return
-
         # Calculate cutoff time
         cutoff_time = datetime.utcnow() - timedelta(hours=self.retention_hours)
         cutoff_timestamp = cutoff_time.timestamp()
@@ -83,56 +98,37 @@ class CleanupService:
         total_deleted = 0
         total_bytes_freed = 0
 
-        # Iterate through client directories
-        for client_dir in client_ids_path.iterdir():
-            if not client_dir.is_dir():
-                continue
+        # Iterate through all devices using the storage backend
+        for client_id, device_id in self.storage.list_all_devices():
+            state_key = f"{client_id}:{device_id}"
 
-            client_id = client_dir.name
-            device_id_dir = client_dir / "device_id"
+            # Clean up old segments
+            deleted_count = 0
+            bytes_freed = 0
 
-            if not device_id_dir.exists():
-                continue
-
-            # Iterate through device directories for this client
-            for device_dir in device_id_dir.iterdir():
-                if not device_dir.is_dir():
-                    continue
-
-                device_id = device_dir.name
-                state_key = f"{client_id}:{device_id}"
-                segments_dir = device_dir / "hls" / "segments"
-
-                if not segments_dir.exists():
-                    continue
-
-                # Find and delete old segments
-                deleted_count = 0
-                bytes_freed = 0
-
-                for segment_file in segments_dir.glob("seg_*.ts"):
-                    try:
-                        # Check file modification time
-                        mtime = segment_file.stat().st_mtime
-
-                        if mtime < cutoff_timestamp:
-                            file_size = segment_file.stat().st_size
-                            segment_file.unlink()
+            for file_info in self.storage.list_files(
+                client_id, device_id, "hls/segments", pattern="seg_*.ts"
+            ):
+                try:
+                    # Check file modification time
+                    if file_info.mtime < cutoff_timestamp:
+                        bytes_freed += file_info.size
+                        if self.storage.delete_file(
+                            client_id, device_id, f"hls/segments/{file_info.name}"
+                        ):
                             deleted_count += 1
-                            bytes_freed += file_size
+                except Exception as e:
+                    logger.error(f"Error deleting segment {file_info.name}: {e}")
 
-                    except Exception as e:
-                        logger.error(f"Error deleting {segment_file}: {e}")
+            if deleted_count > 0:
+                segments_deleted_total.labels(device_id=state_key).inc(deleted_count)
+                logger.info(
+                    f"Cleaned up {state_key}: "
+                    f"{deleted_count} segments, {bytes_freed / 1024 / 1024:.2f} MB freed"
+                )
 
-                if deleted_count > 0:
-                    segments_deleted_total.labels(device_id=state_key).inc(deleted_count)
-                    logger.info(
-                        f"Cleaned up {state_key}: "
-                        f"{deleted_count} segments, {bytes_freed / 1024 / 1024:.2f} MB freed"
-                    )
-
-                total_deleted += deleted_count
-                total_bytes_freed += bytes_freed
+            total_deleted += deleted_count
+            total_bytes_freed += bytes_freed
 
         # Also clean up old source frames
         await self._cleanup_frames(cutoff_timestamp)
@@ -156,44 +152,23 @@ class CleanupService:
         Directory structure:
         {base_path}/client_ids/{client_id}/device_id/{device_id}/frames/
         """
-        base_path = Path(self.storage.base_path)
-        client_ids_path = base_path / "client_ids"
-
-        if not client_ids_path.exists():
-            return
-
         deleted_count = 0
 
-        # Iterate through client directories
-        for client_dir in client_ids_path.iterdir():
-            if not client_dir.is_dir():
-                continue
-
-            device_id_dir = client_dir / "device_id"
-            if not device_id_dir.exists():
-                continue
-
-            # Iterate through device directories for this client
-            for device_dir in device_id_dir.iterdir():
-                if not device_dir.is_dir():
-                    continue
-
-                frames_dir = device_dir / "frames"
-                if not frames_dir.exists():
-                    continue
-
-                # Clean up old frames (jpg and png)
-                for pattern in ["*.jpg", "*.jpeg", "*.png"]:
-                    for frame_file in frames_dir.glob(pattern):
-                        try:
-                            mtime = frame_file.stat().st_mtime
-
-                            if mtime < cutoff_timestamp:
-                                frame_file.unlink()
+        # Iterate through all devices
+        for client_id, device_id in self.storage.list_all_devices():
+            # Clean up old frames (jpg and png)
+            for pattern in ["*.jpg", "*.jpeg", "*.png"]:
+                for file_info in self.storage.list_files(
+                    client_id, device_id, "frames", pattern=pattern
+                ):
+                    try:
+                        if file_info.mtime < cutoff_timestamp:
+                            if self.storage.delete_file(
+                                client_id, device_id, f"frames/{file_info.name}"
+                            ):
                                 deleted_count += 1
-
-                        except Exception as e:
-                            logger.error(f"Error deleting frame {frame_file}: {e}")
+                    except Exception as e:
+                        logger.error(f"Error deleting frame {file_info.name}: {e}")
 
         if deleted_count > 0:
             logger.debug(f"Cleaned up {deleted_count} old source frames")

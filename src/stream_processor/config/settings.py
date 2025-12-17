@@ -23,12 +23,21 @@ class PulsarConfig(BaseSettings):
 
 
 class StorageConfig(BaseSettings):
-    """Shared storage configuration."""
+    """Storage configuration supporting filesystem and GCS backends."""
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="STORAGE_", extra="ignore")
 
-    base_path: str = Field(default="/storage/streams", description="Base storage path")
-    # Directory structure:
+    # Storage backend type: 'filesystem' or 'gcs'
+    type: str = Field(default="filesystem", description="Storage backend type (filesystem or gcs)")
+
+    # Filesystem storage settings
+    base_path: str = Field(default="/storage/streams", description="Base storage path for filesystem backend")
+
+    # GCS storage settings (used when type='gcs')
+    gcs_bucket: str | None = Field(default=None, description="GCS bucket name")
+    gcs_project_id: str | None = Field(default=None, description="GCS project ID (optional, uses ADC if not set)")
+
+    # Directory structure (same for both backends):
     # {base_path}/client_ids/{client_id}/device_id/{device_id}/frames/  <- actual frames
     # {base_path}/client_ids/{client_id}/device_id/{device_id}/hls/     <- HLS output
     # {base_path}/client_ids/{client_id}/request_id/{request_id}        -> symlink to ../device_id/{device_id}/frames

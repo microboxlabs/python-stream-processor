@@ -2,6 +2,7 @@
 HLS Generator Service
 
 Generates HLS segments and maintains rolling playlists using FFmpeg.
+Supports both filesystem and GCS storage backends.
 """
 
 import os
@@ -12,7 +13,11 @@ from pathlib import Path
 from ..config.settings import settings
 from ..utils.logger import get_logger
 from ..utils.metrics import ffmpeg_duration_histogram, segments_generated_total
-from ..utils.path import sanitize_path_component
+from .storage_backend import (
+    GcsStorageBackend,
+    StorageBackend,
+    create_storage_backend,
+)
 
 logger = get_logger(__name__)
 
@@ -22,42 +27,40 @@ class HLSGenerator:
     FFmpeg-based HLS segment generator.
 
     Creates video segments and maintains rolling playlists per device.
+    Supports both filesystem and GCS storage backends.
     """
 
-    def __init__(self):
-        """Initialize the HLS generator."""
+    def __init__(self, storage: StorageBackend | None = None):
+        """
+        Initialize the HLS generator.
+
+        Args:
+            storage: Optional storage backend. If not provided, creates one from settings.
+        """
         self.config = settings.processing
-        self.storage = settings.storage
+        self.storage_config = settings.storage
 
-        # Base path will be created per client/device as needed
-        Path(self.storage.base_path).mkdir(parents=True, exist_ok=True)
+        # Initialize storage backend
+        if storage is not None:
+            self.storage = storage
+        else:
+            self.storage = create_storage_backend(
+                storage_type=self.storage_config.type,
+                base_path=self.storage_config.base_path,
+                gcs_bucket=self.storage_config.gcs_bucket,
+                gcs_project_id=self.storage_config.gcs_project_id,
+            )
 
-    def _get_device_hls_path(self, client_id: str, device_id: str) -> Path:
-        """
-        Get HLS output path for a client/device.
+        logger.info(f"HLS Generator using {self.storage.get_storage_type()} storage backend")
 
-        Path structure: {base_path}/client_ids/{client_id}/device_id/{device_id}/hls/
-        """
-        safe_client_id = sanitize_path_component(client_id)
-        safe_device_id = sanitize_path_component(device_id)
-        device_path = (
-            Path(self.storage.base_path)
-            / "client_ids"
-            / safe_client_id
-            / "device_id"
-            / safe_device_id
-            / "hls"
-        )
-        device_path.mkdir(parents=True, exist_ok=True)
-
-        segments_path = device_path / "segments"
-        segments_path.mkdir(parents=True, exist_ok=True)
-
-        return device_path
+    def _ensure_hls_directories(self, client_id: str, device_id: str) -> None:
+        """Ensure HLS directories exist for a device."""
+        self.storage.ensure_directory_exists(client_id, device_id, "hls")
+        self.storage.ensure_directory_exists(client_id, device_id, "hls/segments")
 
     def get_highest_segment_number(self, client_id: str, device_id: str) -> int:
         """
-        Find the highest existing segment number by checking the most recent segment file.
+        Find the highest existing segment number by checking segment files.
 
         Used to resume segment numbering after restart.
 
@@ -66,20 +69,18 @@ class HLSGenerator:
         """
         import re
 
-        device_path = self._get_device_hls_path(client_id, device_id)
-        segments_path = device_path / "segments"
+        self._ensure_hls_directories(client_id, device_id)
 
-        if not segments_path.exists():
-            return -1
-
-        # Get all segment files using glob
-        segment_files = list(segments_path.glob("seg_*.ts"))
+        # List all segment files
+        segment_files = list(
+            self.storage.list_files(client_id, device_id, "hls/segments", pattern="seg_*.ts")
+        )
 
         if not segment_files:
             return -1
 
         # Find the most recently modified segment file
-        latest_file = max(segment_files, key=lambda f: f.stat().st_mtime)
+        latest_file = max(segment_files, key=lambda f: f.mtime)
 
         # Extract segment number from filename: seg_000123.ts -> 123
         match = re.search(r"seg_(\d+)\.ts$", latest_file.name)
@@ -121,6 +122,34 @@ class HLSGenerator:
 
         return list_path
 
+    def _prepare_frame_paths_for_ffmpeg(self, frames: list[str]) -> list[str]:
+        """
+        Prepare frame paths for FFmpeg processing.
+
+        For filesystem backend, frames are already local.
+        For GCS backend, the frames should already be stored locally by the publisher.
+
+        Args:
+            frames: List of frame paths (may be local or GCS URIs)
+
+        Returns:
+            List of local paths that FFmpeg can read
+        """
+        local_paths = []
+
+        for frame_path in frames:
+            if frame_path.startswith("gs://"):
+                # GCS URI - need to download to temp location
+                # Parse: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
+                # For now, skip GCS-stored frames as they need special handling
+                logger.warning(f"GCS frame path not yet supported for input: {frame_path}")
+                continue
+            else:
+                # Local filesystem path
+                local_paths.append(frame_path)
+
+        return local_paths
+
     def generate_segment(
         self,
         client_id: str,
@@ -138,32 +167,48 @@ class HLSGenerator:
             segment_number: Segment sequence number
 
         Returns:
-            Path to generated segment file, or None if frames are missing
+            Path/URI to generated segment file, or None if frames are missing
         """
         import time
 
         start_time = time.time()
 
-        device_path = self._get_device_hls_path(client_id, device_id)
+        self._ensure_hls_directories(client_id, device_id)
+
         segment_filename = f"seg_{segment_number:06d}.ts"
-        segment_path = device_path / "segments" / segment_filename
 
         logger.info(f"Generating segment {segment_filename} for {device_id}")
-        logger.info(f"Path: {segment_path}")
+
+        # Prepare local paths for frames
+        local_frames = self._prepare_frame_paths_for_ffmpeg(frames)
 
         # Validate all frame paths exist before processing
-        missing_frames = [frame for frame in frames if not Path(frame).exists()]
+        missing_frames = [frame for frame in local_frames if not Path(frame).exists()]
         if missing_frames:
             logger.debug(
                 f"Skipping segment generation for {device_id}: "
-                f"{len(missing_frames)}/{len(frames)} frames missing"
+                f"{len(missing_frames)}/{len(local_frames)} frames missing"
             )
             return None
 
-        logger.debug(f"Input frames: {len(frames)}")
+        if not local_frames:
+            logger.debug(f"No valid frames for segment generation: {device_id}")
+            return None
+
+        logger.debug(f"Input frames: {len(local_frames)}")
 
         # Create input file list
-        input_list_path = self._create_input_file_list(frames)
+        input_list_path = self._create_input_file_list(local_frames)
+
+        # Determine output path based on storage type
+        if isinstance(self.storage, GcsStorageBackend):
+            # For GCS, write to temp directory then upload
+            output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
+            segment_path = output_dir / segment_filename
+        else:
+            # For filesystem, write directly
+            output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
+            segment_path = output_dir / segment_filename
 
         try:
             # FFmpeg command to generate segment
@@ -221,6 +266,15 @@ class HLSGenerator:
             segment_size = segment_path.stat().st_size
             duration = time.time() - start_time
 
+            # For GCS, upload the segment
+            final_uri: str
+            if isinstance(self.storage, GcsStorageBackend):
+                final_uri = self.storage.sync_local_to_gcs(
+                    client_id, device_id, "hls/segments", segment_filename
+                )
+            else:
+                final_uri = str(segment_path)
+
             # Record metrics
             segments_generated_total.labels(device_id=device_id).inc()
             ffmpeg_duration_histogram.labels(device_id=device_id).observe(duration)
@@ -232,7 +286,7 @@ class HLSGenerator:
             # Update playlist
             self._update_playlist(client_id, device_id, segment_number, segment_filename)
 
-            return str(segment_path)
+            return final_uri
 
         except subprocess.CalledProcessError as e:
             logger.error(f"FFmpeg failed: {e.stderr}")
@@ -261,9 +315,6 @@ class HLSGenerator:
 
         Maintains a rolling window playlist with the last N segments.
         """
-        device_path = self._get_device_hls_path(client_id, device_id)
-        playlist_path = device_path / "playlist.m3u8"
-
         # Calculate segment duration
         segment_duration = self.config.segment_duration_seconds
 
@@ -281,31 +332,35 @@ class HLSGenerator:
             f"#EXT-X-MEDIA-SEQUENCE:{oldest_segment}",
         ]
 
-        # Add segment entries
+        # Add segment entries - check which segments actually exist
         for seg_num in range(oldest_segment, current_segment + 1):
             seg_filename = f"seg_{seg_num:06d}.ts"
-            seg_path = device_path / "segments" / seg_filename
 
-            if seg_path.exists():
+            # Check if segment exists in storage
+            if self.storage.file_exists(client_id, device_id, f"hls/segments/{seg_filename}"):
                 playlist_lines.append(f"#EXTINF:{segment_duration}.0,")
                 playlist_lines.append(f"segments/{seg_filename}")
 
         # Write playlist
         playlist_content = "\n".join(playlist_lines) + "\n"
 
-        # Atomic write
-        temp_path = playlist_path.with_suffix(".tmp")
-        temp_path.write_text(playlist_content)
-        temp_path.rename(playlist_path)
+        # Use atomic write
+        self.storage.write_file_atomic(
+            client_id,
+            device_id,
+            "hls/playlist.m3u8",
+            playlist_content.encode("utf-8"),
+            content_type="application/vnd.apple.mpegurl",
+        )
 
         logger.debug(
             f"Playlist updated for {device_id}: {current_segment - oldest_segment + 1} segments"
         )
 
-    def get_playlist_path(self, client_id: str, device_id: str) -> Path:
-        """Get the playlist path for a client/device."""
-        return self._get_device_hls_path(client_id, device_id) / "playlist.m3u8"
+    def get_playlist_path(self, client_id: str, device_id: str) -> Path | None:
+        """Get the playlist path for a client/device (filesystem only)."""
+        return self.storage.get_local_path(client_id, device_id, "hls/playlist.m3u8")
 
-    def get_segment_path(self, client_id: str, device_id: str, segment_filename: str) -> Path:
-        """Get a segment file path for a client/device."""
-        return self._get_device_hls_path(client_id, device_id) / "segments" / segment_filename
+    def get_segment_path(self, client_id: str, device_id: str, segment_filename: str) -> Path | None:
+        """Get a segment file path for a client/device (filesystem only)."""
+        return self.storage.get_local_path(client_id, device_id, f"hls/segments/{segment_filename}")
