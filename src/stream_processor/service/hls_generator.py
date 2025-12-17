@@ -17,6 +17,7 @@ from .storage_backend import (
     GcsStorageBackend,
     StorageBackend,
     create_storage_backend,
+    download_gcs_uri,
 )
 
 logger = get_logger(__name__)
@@ -122,33 +123,47 @@ class HLSGenerator:
 
         return list_path
 
-    def _prepare_frame_paths_for_ffmpeg(self, frames: list[str]) -> list[str]:
+    def _prepare_frame_paths_for_ffmpeg(
+        self, frames: list[str]
+    ) -> tuple[list[str], list[str]]:
         """
         Prepare frame paths for FFmpeg processing.
 
         For filesystem backend, frames are already local.
-        For GCS backend, the frames should already be stored locally by the publisher.
+        For GCS backend, downloads frames to local temp directory.
 
         Args:
             frames: List of frame paths (may be local or GCS URIs)
 
         Returns:
-            List of local paths that FFmpeg can read
+            Tuple of (local_paths, downloaded_paths) where:
+            - local_paths: List of local paths that FFmpeg can read
+            - downloaded_paths: List of paths that were downloaded from GCS (for cleanup)
         """
         local_paths = []
+        downloaded_paths = []
 
         for frame_path in frames:
             if frame_path.startswith("gs://"):
-                # GCS URI - need to download to temp location
-                # Parse: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
-                # For now, skip GCS-stored frames as they need special handling
-                logger.warning(f"GCS frame path not yet supported for input: {frame_path}")
-                continue
+                # GCS URI - download to temp location for FFmpeg
+                if isinstance(self.storage, GcsStorageBackend):
+                    # Use the storage backend's temp directory
+                    local_path = self.storage.download_gcs_uri_to_local(frame_path)
+                else:
+                    # Filesystem storage but receiving GCS URIs from publisher
+                    local_path = download_gcs_uri(frame_path)
+
+                if local_path is not None:
+                    local_path_str = str(local_path)
+                    local_paths.append(local_path_str)
+                    downloaded_paths.append(local_path_str)
+                else:
+                    logger.warning(f"Failed to download GCS frame: {frame_path}")
             else:
                 # Local filesystem path
                 local_paths.append(frame_path)
 
-        return local_paths
+        return local_paths, downloaded_paths
 
     def generate_segment(
         self,
@@ -179,8 +194,8 @@ class HLSGenerator:
 
         logger.info(f"Generating segment {segment_filename} for {device_id}")
 
-        # Prepare local paths for frames
-        local_frames = self._prepare_frame_paths_for_ffmpeg(frames)
+        # Prepare local paths for frames (downloads GCS frames if needed)
+        local_frames, downloaded_gcs_frames = self._prepare_frame_paths_for_ffmpeg(frames)
 
         # Validate all frame paths exist before processing
         missing_frames = [frame for frame in local_frames if not Path(frame).exists()]
@@ -302,6 +317,13 @@ class HLSGenerator:
                 os.unlink(input_list_path)
             except Exception:
                 pass
+
+            # Clean up downloaded GCS frames to avoid accumulating temp files
+            for downloaded_frame in downloaded_gcs_frames:
+                try:
+                    Path(downloaded_frame).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _update_playlist(
         self,

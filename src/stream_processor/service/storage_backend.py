@@ -557,6 +557,114 @@ class GcsStorageBackend(StorageBackend):
         if self._temp_dir.exists():
             shutil.rmtree(self._temp_dir, ignore_errors=True)
 
+    def download_gcs_uri_to_local(self, gcs_uri: str) -> Path | None:
+        """
+        Download a file from a GCS URI to a local temp path.
+
+        Args:
+            gcs_uri: GCS URI in format gs://bucket/path/to/file
+
+        Returns:
+            Local Path to downloaded file, or None if download failed
+        """
+        if not gcs_uri.startswith("gs://"):
+            logger.warning(f"Invalid GCS URI: {gcs_uri}")
+            return None
+
+        try:
+            # Parse URI: gs://bucket/path/to/file
+            uri_parts = gcs_uri[5:].split("/", 1)
+            if len(uri_parts) != 2:
+                logger.warning(f"Invalid GCS URI format: {gcs_uri}")
+                return None
+
+            bucket_name = uri_parts[0]
+            blob_path = uri_parts[1]
+
+            # Get the bucket (may be different from self.bucket_name)
+            if bucket_name == self.bucket_name:
+                bucket = self.bucket
+            else:
+                bucket = self.client.bucket(bucket_name)
+
+            blob = bucket.blob(blob_path)
+
+            if not blob.exists():
+                logger.debug(f"GCS file not found: {gcs_uri}")
+                return None
+
+            # Create local path preserving structure
+            local_path = self._temp_dir / blob_path
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Download to local file
+            blob.download_to_filename(str(local_path))
+            logger.debug(f"Downloaded GCS file to: {local_path}")
+
+            return local_path
+
+        except Exception as e:
+            logger.error(f"Failed to download GCS URI {gcs_uri}: {e}")
+            return None
+
+
+def download_gcs_uri(gcs_uri: str, temp_dir: Path | None = None) -> Path | None:
+    """
+    Standalone function to download a file from a GCS URI.
+
+    This is useful when frames come from GCS but we don't have a
+    GcsStorageBackend instance (e.g., filesystem mode receiving GCS URIs).
+
+    Args:
+        gcs_uri: GCS URI in format gs://bucket/path/to/file
+        temp_dir: Optional temp directory to use (creates one if not provided)
+
+    Returns:
+        Local Path to downloaded file, or None if download failed
+    """
+    if not gcs_uri.startswith("gs://"):
+        logger.warning(f"Invalid GCS URI: {gcs_uri}")
+        return None
+
+    try:
+        from google.cloud import storage
+
+        # Parse URI: gs://bucket/path/to/file
+        uri_parts = gcs_uri[5:].split("/", 1)
+        if len(uri_parts) != 2:
+            logger.warning(f"Invalid GCS URI format: {gcs_uri}")
+            return None
+
+        bucket_name = uri_parts[0]
+        blob_path = uri_parts[1]
+
+        # Create temp directory if needed
+        if temp_dir is None:
+            temp_dir = Path(tempfile.mkdtemp(prefix="gcs_download_"))
+
+        # Get the blob
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+
+        if not blob.exists():
+            logger.debug(f"GCS file not found: {gcs_uri}")
+            return None
+
+        # Create local path preserving structure
+        local_path = temp_dir / blob_path
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Download to local file
+        blob.download_to_filename(str(local_path))
+        logger.debug(f"Downloaded GCS file to: {local_path}")
+
+        return local_path
+
+    except Exception as e:
+        logger.error(f"Failed to download GCS URI {gcs_uri}: {e}")
+        return None
+
 
 def create_storage_backend(
     storage_type: str,
