@@ -106,8 +106,7 @@ class OfflineChecker:
         # Check if any segments were generated
         if session.first_segment_number < 0 or session.last_segment_number < 0:
             logger.info(
-                f"Session has no segments to archive: {state_key} "
-                f"(no segments were generated)"
+                f"Session has no segments to archive: {state_key} (no segments were generated)"
             )
             return
 
@@ -139,8 +138,7 @@ class OfflineChecker:
         # Create archive
         try:
             logger.info(
-                f"Creating archive for ended session: {state_key} "
-                f"session={session.session_id}"
+                f"Creating archive for ended session: {state_key} session={session.session_id}"
             )
             await self.archive_service.create_archive(device_session)
         except Exception as e:

@@ -123,9 +123,7 @@ class HLSGenerator:
 
         return list_path
 
-    def _prepare_frame_paths_for_ffmpeg(
-        self, frames: list[str]
-    ) -> tuple[list[str], list[str]]:
+    def _prepare_frame_paths_for_ffmpeg(self, frames: list[str]) -> tuple[list[str], list[str]]:
         """
         Prepare frame paths for FFmpeg processing.
 
@@ -381,6 +379,8 @@ class HLSGenerator:
         """Get the playlist path for a client/device (filesystem only)."""
         return self.storage.get_local_path(client_id, device_id, "hls/playlist.m3u8")
 
-    def get_segment_path(self, client_id: str, device_id: str, segment_filename: str) -> Path | None:
+    def get_segment_path(
+        self, client_id: str, device_id: str, segment_filename: str
+    ) -> Path | None:
         """Get a segment file path for a client/device (filesystem only)."""
         return self.storage.get_local_path(client_id, device_id, f"hls/segments/{segment_filename}")

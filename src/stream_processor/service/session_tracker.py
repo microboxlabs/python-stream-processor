@@ -118,8 +118,7 @@ class DeviceSessionTracker:
             )
             self.sessions[state_key] = session
             logger.info(
-                f"New session started (on frame receipt): {state_key} "
-                f"session={session.session_id}"
+                f"New session started (on frame receipt): {state_key} session={session.session_id}"
             )
 
         return session
@@ -150,10 +149,7 @@ class DeviceSessionTracker:
             # Set first segment number if not yet set
             if session.first_segment_number < 0:
                 session.first_segment_number = segment_number
-                logger.info(
-                    f"Session first segment recorded: {state_key} "
-                    f"segment={segment_number}"
-                )
+                logger.info(f"Session first segment recorded: {state_key} segment={segment_number}")
 
             # Update last segment number
             session.update_segment(segment_number)
@@ -248,8 +244,7 @@ class DeviceSessionTracker:
         # Check if any segments were generated
         if session.first_segment_number < 0 or session.last_segment_number < 0:
             logger.info(
-                f"Session has no segments to archive: {state_key} "
-                f"(no segments were generated)"
+                f"Session has no segments to archive: {state_key} (no segments were generated)"
             )
             return
 

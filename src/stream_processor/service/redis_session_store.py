@@ -157,10 +157,7 @@ class RedisSessionStore:
                 last_segment_number=-1,
                 frame_count=1,
             )
-            logger.info(
-                f"New session started: {session.state_key} "
-                f"session={session.session_id}"
-            )
+            logger.info(f"New session started: {session.state_key} session={session.session_id}")
             # Add to active sessions index
             await client.sadd(SESSION_INDEX_KEY, session.state_key)  # type: ignore[misc]
 
@@ -194,9 +191,7 @@ class RedisSessionStore:
 
         existing = await client.get(key)
         if not existing:
-            logger.warning(
-                f"No active session for segment update: {client_id}:{device_id}"
-            )
+            logger.warning(f"No active session for segment update: {client_id}:{device_id}")
             return None
 
         session = SessionData.from_json(existing)
@@ -205,8 +200,7 @@ class RedisSessionStore:
         if session.first_segment_number < 0:
             session.first_segment_number = segment_number
             logger.info(
-                f"Session first segment recorded: {session.state_key} "
-                f"segment={segment_number}"
+                f"Session first segment recorded: {session.state_key} segment={segment_number}"
             )
 
         # Update last segment number
@@ -218,9 +212,7 @@ class RedisSessionStore:
 
         return session
 
-    async def get_session(
-        self, client_id: str, device_id: str
-    ) -> SessionData | None:
+    async def get_session(self, client_id: str, device_id: str) -> SessionData | None:
         """Get session data for a device."""
         client = await self.connect()
 

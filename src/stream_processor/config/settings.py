@@ -31,11 +31,15 @@ class StorageConfig(BaseSettings):
     type: str = Field(default="filesystem", description="Storage backend type (filesystem or gcs)")
 
     # Filesystem storage settings
-    base_path: str = Field(default="/storage/streams", description="Base storage path for filesystem backend")
+    base_path: str = Field(
+        default="/storage/streams", description="Base storage path for filesystem backend"
+    )
 
     # GCS storage settings (used when type='gcs')
     gcs_bucket: str | None = Field(default=None, description="GCS bucket name")
-    gcs_project_id: str | None = Field(default=None, description="GCS project ID (optional, uses ADC if not set)")
+    gcs_project_id: str | None = Field(
+        default=None, description="GCS project ID (optional, uses ADC if not set)"
+    )
 
     # Directory structure (same for both backends):
     # {base_path}/client_ids/{client_id}/device_id/{device_id}/frames/  <- actual frames

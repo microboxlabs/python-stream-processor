@@ -84,7 +84,9 @@ class StreamProcessorConsumer:
                 current_segment_number=initial_segment,
             )
             active_devices_gauge.inc()
-            logger.info(f"New device registered: {state_key} (starting at segment {initial_segment})")
+            logger.info(
+                f"New device registered: {state_key} (starting at segment {initial_segment})"
+            )
         return self.device_states[state_key]
 
     def _get_device_lock(self, state_key: str) -> asyncio.Lock:
@@ -160,9 +162,7 @@ class StreamProcessorConsumer:
 
                 # Update session segment info in Redis (for offline-checker service)
                 if self.session_store:
-                    await self.session_store.update_segment(
-                        client_id, device_id, segment_number
-                    )
+                    await self.session_store.update_segment(client_id, device_id, segment_number)
             else:
                 logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 

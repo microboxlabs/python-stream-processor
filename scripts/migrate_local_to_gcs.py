@@ -77,15 +77,17 @@ def discover_devices(source_path: Path) -> list[dict]:
             segment_files = list(segments_path.glob("*.ts")) if segments_path.exists() else []
 
             if frame_files or segment_files:
-                devices.append({
-                    "client_id": client_id,
-                    "device_id": device_id,
-                    "path": device_dir,
-                    "frames_path": frames_path,
-                    "segments_path": segments_path,
-                    "frame_count": len(frame_files),
-                    "segment_count": len(segment_files),
-                })
+                devices.append(
+                    {
+                        "client_id": client_id,
+                        "device_id": device_id,
+                        "path": device_dir,
+                        "frames_path": frames_path,
+                        "segments_path": segments_path,
+                        "frame_count": len(frame_files),
+                        "segment_count": len(segment_files),
+                    }
+                )
 
     return devices
 
@@ -105,12 +107,14 @@ def analyze_segments(segments_path: Path) -> dict:
         seg_num = parse_segment_number(seg_file.name)
         if seg_num is not None:
             stat = seg_file.stat()
-            segments.append({
-                "number": seg_num,
-                "path": seg_file,
-                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=UTC),
-                "size": stat.st_size,
-            })
+            segments.append(
+                {
+                    "number": seg_num,
+                    "path": seg_file,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                    "size": stat.st_size,
+                }
+            )
 
     if not segments:
         return {}
@@ -122,7 +126,7 @@ def analyze_segments(segments_path: Path) -> dict:
     current_session = [segments[0]]
 
     for i in range(1, len(segments)):
-        gap = segments[i]["number"] - segments[i-1]["number"]
+        gap = segments[i]["number"] - segments[i - 1]["number"]
         if gap > 5:
             # New session
             sessions.append(current_session)
@@ -211,7 +215,9 @@ async def upload_to_gcs(
         # Upload segments
         if device["segments_path"].exists():
             for seg_file in device["segments_path"].glob("*.ts"):
-                gcs_path = f"client_ids/{client_id}/device_id/{device_id}/hls/segments/{seg_file.name}"
+                gcs_path = (
+                    f"client_ids/{client_id}/device_id/{device_id}/hls/segments/{seg_file.name}"
+                )
 
                 if dry_run:
                     print(f"  Would upload: {seg_file.name} -> {gcs_path}")
@@ -338,11 +344,12 @@ async def create_deferred_transmissions(
                     playlist_lines.append("#EXT-X-ENDLIST")
                     playlist_content = "\n".join(playlist_lines)
 
-                    playlist_path = f"client_ids/{client_id}/device_id/{device_id}/{archive_path}/playlist.m3u8"
+                    playlist_path = (
+                        f"client_ids/{client_id}/device_id/{device_id}/{archive_path}/playlist.m3u8"
+                    )
                     playlist_blob = bucket.blob(playlist_path)
                     playlist_blob.upload_from_string(
-                        playlist_content,
-                        content_type="application/vnd.apple.mpegurl"
+                        playlist_content, content_type="application/vnd.apple.mpegurl"
                     )
 
                     # Insert into database
@@ -355,10 +362,17 @@ async def create_deferred_transmissions(
                         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ready', $11)
                         ON CONFLICT (client_id, device_id, session_id) DO NOTHING
                         """,
-                        client_id, device_id, session_id,
-                        started_at, ended_at, duration_seconds,
-                        first_seg["number"], last_seg["number"],
-                        len(session_segments), archive_path, expires_at
+                        client_id,
+                        device_id,
+                        session_id,
+                        started_at,
+                        ended_at,
+                        duration_seconds,
+                        first_seg["number"],
+                        last_seg["number"],
+                        len(session_segments),
+                        archive_path,
+                        expires_at,
                     )
 
                     print(f"    Copied {len(session_segments)} segments, created playlist")
@@ -436,7 +450,9 @@ async def main():
 
         segment_info = analyze_segments(device["segments_path"])
         if segment_info:
-            print(f"  Segment range: {segment_info['first_segment']} - {segment_info['last_segment']}")
+            print(
+                f"  Segment range: {segment_info['first_segment']} - {segment_info['last_segment']}"
+            )
             print(f"  Sessions: {len(segment_info.get('sessions', []))}")
 
         frame_info = analyze_frames(device["frames_path"])

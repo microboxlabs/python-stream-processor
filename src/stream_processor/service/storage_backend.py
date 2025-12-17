@@ -53,7 +53,12 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def write_file(
-        self, client_id: str, device_id: str, subpath: str, data: bytes, content_type: str | None = None
+        self,
+        client_id: str,
+        device_id: str,
+        subpath: str,
+        data: bytes,
+        content_type: str | None = None,
     ) -> str:
         """
         Write data to a file.
@@ -72,7 +77,12 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def write_file_atomic(
-        self, client_id: str, device_id: str, subpath: str, data: bytes, content_type: str | None = None
+        self,
+        client_id: str,
+        device_id: str,
+        subpath: str,
+        data: bytes,
+        content_type: str | None = None,
     ) -> str:
         """
         Write data atomically (for playlists that need consistent reads).
@@ -217,7 +227,12 @@ class FilesystemStorageBackend(StorageBackend):
         full_path.mkdir(parents=True, exist_ok=True)
 
     def write_file(
-        self, client_id: str, device_id: str, subpath: str, data: bytes, content_type: str | None = None
+        self,
+        client_id: str,
+        device_id: str,
+        subpath: str,
+        data: bytes,
+        content_type: str | None = None,
     ) -> str:
         """Write file to filesystem."""
         full_path = self._get_full_path(client_id, device_id, subpath)
@@ -226,7 +241,12 @@ class FilesystemStorageBackend(StorageBackend):
         return str(full_path)
 
     def write_file_atomic(
-        self, client_id: str, device_id: str, subpath: str, data: bytes, content_type: str | None = None
+        self,
+        client_id: str,
+        device_id: str,
+        subpath: str,
+        data: bytes,
+        content_type: str | None = None,
     ) -> str:
         """Write file atomically using temp file + rename."""
         full_path = self._get_full_path(client_id, device_id, subpath)
@@ -389,7 +409,12 @@ class GcsStorageBackend(StorageBackend):
         pass
 
     def write_file(
-        self, client_id: str, device_id: str, subpath: str, data: bytes, content_type: str | None = None
+        self,
+        client_id: str,
+        device_id: str,
+        subpath: str,
+        data: bytes,
+        content_type: str | None = None,
     ) -> str:
         """Write file to GCS."""
         blob_path = self._get_blob_path(client_id, device_id, subpath)
@@ -404,7 +429,12 @@ class GcsStorageBackend(StorageBackend):
         return uri
 
     def write_file_atomic(
-        self, client_id: str, device_id: str, subpath: str, data: bytes, content_type: str | None = None
+        self,
+        client_id: str,
+        device_id: str,
+        subpath: str,
+        data: bytes,
+        content_type: str | None = None,
     ) -> str:
         """Write file to GCS (GCS writes are already atomic)."""
         return self.write_file(client_id, device_id, subpath, data, content_type)
