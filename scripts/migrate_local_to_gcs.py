@@ -16,7 +16,7 @@ import asyncio
 import os
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asyncpg
@@ -31,7 +31,7 @@ def parse_frame_timestamp(filename: str) -> datetime | None:
     date_str, time_str, millis = match.groups()
     try:
         dt = datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
-        dt = dt.replace(microsecond=int(millis) * 1000, tzinfo=timezone.utc)
+        dt = dt.replace(microsecond=int(millis) * 1000, tzinfo=UTC)
         return dt
     except ValueError:
         return None
@@ -108,7 +108,7 @@ def analyze_segments(segments_path: Path) -> dict:
             segments.append({
                 "number": seg_num,
                 "path": seg_file,
-                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+                "mtime": datetime.fromtimestamp(stat.st_mtime, tz=UTC),
                 "size": stat.st_size,
             })
 
@@ -285,7 +285,7 @@ async def create_deferred_transmissions(
                 if duration_seconds < 60:
                     duration_seconds = len(session_segments) * segment_duration
 
-                expires_at = datetime.now(timezone.utc) + timedelta(days=retention_days)
+                expires_at = datetime.now(UTC) + timedelta(days=retention_days)
                 archive_path = f"archives/{session_id}"
 
                 archive_info = {
