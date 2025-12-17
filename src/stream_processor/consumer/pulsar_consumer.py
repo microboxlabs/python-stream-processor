@@ -12,6 +12,7 @@ import pulsar
 from ..config.settings import settings
 from ..model.events import DeviceState, FrameEvent
 from ..service.hls_generator import HLSGenerator
+from ..service.redis_session_store import RedisSessionStore
 from ..utils.logger import get_logger
 from ..utils.metrics import (
     active_devices_gauge,
@@ -30,10 +31,17 @@ class StreamProcessorConsumer:
     while allowing horizontal scaling across multiple instances.
     """
 
-    def __init__(self):
-        """Initialize the consumer."""
+    def __init__(self, use_redis: bool = True):
+        """
+        Initialize the consumer.
+
+        Args:
+            use_redis: If True and Redis is enabled, use Redis for session tracking.
+                      Session tracking is used by the separate offline-checker service.
+        """
         self.config = settings.pulsar
         self.processing_config = settings.processing
+        self.archive_config = settings.archive
 
         # Device state tracking (in-memory)
         self.device_states: dict[str, DeviceState] = {}
@@ -53,6 +61,14 @@ class StreamProcessorConsumer:
 
         # Segment generation lock per device
         self.device_locks: dict[str, asyncio.Lock] = {}
+
+        # Redis session store for distributed offline detection
+        # The offline-checker service reads this to detect offline devices
+        self.session_store: RedisSessionStore | None = None
+
+        if use_redis and settings.redis.enabled and self.archive_config.enabled:
+            self.session_store = RedisSessionStore()
+            logger.info("Redis session tracking enabled for offline detection")
 
     def _get_or_create_state(self, client_id: str, device_id: str) -> DeviceState:
         """Get or create device state using client_id:device_id key."""
@@ -94,6 +110,10 @@ class StreamProcessorConsumer:
             # Add frame to pending
             state.add_frame(event.frame_path, event.timestamp)
             frames_received_total.labels(device_id=state_key).inc()
+
+            # Update session activity in Redis (for offline-checker service)
+            if self.session_store:
+                await self.session_store.update_activity(client_id, device_id)
 
             logger.debug(
                 f"Frame received for {state_key}: {event.frame_path} (pending: {state.frame_count})"
@@ -137,6 +157,12 @@ class StreamProcessorConsumer:
 
             if segment_path:
                 logger.info(f"Segment generated: {segment_path}")
+
+                # Update session segment info in Redis (for offline-checker service)
+                if self.session_store:
+                    await self.session_store.update_segment(
+                        client_id, device_id, segment_number
+                    )
             else:
                 logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 
@@ -202,9 +228,14 @@ class StreamProcessorConsumer:
         logger.info(f"Topic: {self.config.topic}")
         logger.info(f"Subscription: {self.config.subscription}")
         logger.info(f"Max Workers: {self.processing_config.max_workers}")
+        logger.info(f"Redis session tracking: {'enabled' if self.session_store else 'disabled'}")
         logger.info("=" * 80)
 
         try:
+            # Connect to Redis if session store is configured
+            if self.session_store:
+                await self.session_store.connect()
+
             # Create Pulsar client
             self.client = pulsar.Client(self.config.service_url)
 
@@ -241,7 +272,7 @@ class StreamProcessorConsumer:
                         logger.error(f"Error receiving message: {e}")
                         await asyncio.sleep(1)
 
-            # Cancel timer task
+            # Cancel background tasks
             timer_task.cancel()
             try:
                 await timer_task
@@ -267,6 +298,13 @@ class StreamProcessorConsumer:
                     await self._generate_segment(state)
                 except Exception as e:
                     logger.error(f"Error processing remaining frames: {e}")
+
+        # Close Redis session store
+        if self.session_store:
+            try:
+                await self.session_store.close()
+            except Exception as e:
+                logger.error(f"Error closing Redis session store: {e}")
 
         # Shutdown executor
         self.executor.shutdown(wait=True)

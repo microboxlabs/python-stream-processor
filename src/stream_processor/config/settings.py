@@ -76,6 +76,24 @@ class MetricsConfig(BaseSettings):
     enabled: bool = Field(default=True, description="Enable metrics endpoint")
 
 
+class ArchiveConfig(BaseSettings):
+    """Archive/deferred transmission configuration."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="ARCHIVE_", extra="ignore")
+
+    enabled: bool = Field(default=True, description="Enable deferred transmission archiving")
+    retention_days: int = Field(default=7, description="Days to retain archived transmissions")
+    min_session_duration_seconds: int = Field(
+        default=60, description="Minimum session duration to archive"
+    )
+    offline_threshold_seconds: int = Field(
+        default=60, description="Seconds without frames before considered offline"
+    )
+    database_url: str | None = Field(
+        default=None, description="PostgreSQL connection URL for archive metadata"
+    )
+
+
 class Settings(BaseSettings):
     """Application settings container."""
 
@@ -90,6 +108,7 @@ class Settings(BaseSettings):
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
 
     # Convenience properties
     @property

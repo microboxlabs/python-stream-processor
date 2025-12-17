@@ -336,6 +336,8 @@ class HLSGenerator:
         Update the HLS playlist for a device.
 
         Maintains a rolling window playlist with the last N segments.
+        Note: We trust that segments in the range exist rather than checking
+        each one via file_exists, which is expensive for GCS (one API call per segment).
         """
         # Calculate segment duration
         segment_duration = self.config.segment_duration_seconds
@@ -354,14 +356,13 @@ class HLSGenerator:
             f"#EXT-X-MEDIA-SEQUENCE:{oldest_segment}",
         ]
 
-        # Add segment entries - check which segments actually exist
+        # Add segment entries for the range
+        # We trust segments exist since we generated them sequentially
+        # Missing segments (due to cleanup) will cause HLS player to skip gracefully
         for seg_num in range(oldest_segment, current_segment + 1):
             seg_filename = f"seg_{seg_num:06d}.ts"
-
-            # Check if segment exists in storage
-            if self.storage.file_exists(client_id, device_id, f"hls/segments/{seg_filename}"):
-                playlist_lines.append(f"#EXTINF:{segment_duration}.0,")
-                playlist_lines.append(f"segments/{seg_filename}")
+            playlist_lines.append(f"#EXTINF:{segment_duration}.0,")
+            playlist_lines.append(f"segments/{seg_filename}")
 
         # Write playlist
         playlist_content = "\n".join(playlist_lines) + "\n"
