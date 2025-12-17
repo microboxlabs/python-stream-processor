@@ -417,13 +417,15 @@ class GcsStorageBackend(StorageBackend):
         if not blob.exists():
             return None
 
-        return blob.download_as_bytes()
+        result: bytes = blob.download_as_bytes()
+        return result
 
     def file_exists(self, client_id: str, device_id: str, subpath: str) -> bool:
         """Check if file exists in GCS."""
         blob_path = self._get_blob_path(client_id, device_id, subpath)
         blob = self.bucket.blob(blob_path)
-        return blob.exists()
+        result: bool = blob.exists()
+        return result
 
     def delete_file(self, client_id: str, device_id: str, subpath: str) -> bool:
         """Delete file from GCS."""

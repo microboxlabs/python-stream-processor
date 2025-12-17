@@ -216,14 +216,11 @@ class HLSGenerator:
         input_list_path = self._create_input_file_list(local_frames)
 
         # Determine output path based on storage type
-        if isinstance(self.storage, GcsStorageBackend):
-            # For GCS, write to temp directory then upload
-            output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
-            segment_path = output_dir / segment_filename
-        else:
-            # For filesystem, write directly
-            output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
-            segment_path = output_dir / segment_filename
+        output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
+        if output_dir is None:
+            logger.error(f"Cannot get output directory for segments: {device_id}")
+            return None
+        segment_path = output_dir / segment_filename
 
         try:
             # FFmpeg command to generate segment

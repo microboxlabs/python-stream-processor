@@ -95,13 +95,14 @@ class RedisSessionStore:
         self.redis_url = redis_url or settings.redis.url
         self._client: redis.Redis | None = None
 
-    async def connect(self) -> None:
-        """Connect to Redis."""
+    async def connect(self) -> redis.Redis:
+        """Connect to Redis and return the client."""
         if self._client is None:
             self._client = redis.from_url(self.redis_url, decode_responses=True)
             # Test connection
-            await self._client.ping()
+            await self._client.ping()  # type: ignore[misc]
             logger.info(f"Connected to Redis at {self.redis_url}")
+        return self._client
 
     async def close(self) -> None:
         """Close Redis connection."""
@@ -132,14 +133,13 @@ class RedisSessionStore:
         Returns:
             The updated SessionData
         """
-        if not self._client:
-            await self.connect()
+        client = await self.connect()
 
         key = self._session_key(client_id, device_id)
         now = datetime.now(UTC).isoformat()
 
         # Try to get existing session
-        existing = await self._client.get(key)
+        existing = await client.get(key)
 
         if existing:
             session = SessionData.from_json(existing)
@@ -162,10 +162,10 @@ class RedisSessionStore:
                 f"session={session.session_id}"
             )
             # Add to active sessions index
-            await self._client.sadd(SESSION_INDEX_KEY, session.state_key)
+            await client.sadd(SESSION_INDEX_KEY, session.state_key)  # type: ignore[misc]
 
         # Save session (with 24h expiry as safety net)
-        await self._client.set(key, session.to_json(), ex=86400)
+        await client.set(key, session.to_json(), ex=86400)
 
         return session
 
@@ -188,12 +188,11 @@ class RedisSessionStore:
         Returns:
             The updated SessionData, or None if session doesn't exist
         """
-        if not self._client:
-            await self.connect()
+        client = await self.connect()
 
         key = self._session_key(client_id, device_id)
 
-        existing = await self._client.get(key)
+        existing = await client.get(key)
         if not existing:
             logger.warning(
                 f"No active session for segment update: {client_id}:{device_id}"
@@ -215,7 +214,7 @@ class RedisSessionStore:
             session.last_segment_number = segment_number
 
         # Save session
-        await self._client.set(key, session.to_json(), ex=86400)
+        await client.set(key, session.to_json(), ex=86400)
 
         return session
 
@@ -223,11 +222,10 @@ class RedisSessionStore:
         self, client_id: str, device_id: str
     ) -> SessionData | None:
         """Get session data for a device."""
-        if not self._client:
-            await self.connect()
+        client = await self.connect()
 
         key = self._session_key(client_id, device_id)
-        data = await self._client.get(key)
+        data = await client.get(key)
 
         if data:
             return SessionData.from_json(data)
@@ -235,13 +233,12 @@ class RedisSessionStore:
 
     async def get_all_sessions(self) -> list[SessionData]:
         """Get all active sessions."""
-        if not self._client:
-            await self.connect()
+        client = await self.connect()
 
         sessions = []
 
         # Get all session keys from index
-        state_keys = await self._client.smembers(SESSION_INDEX_KEY)
+        state_keys = await client.smembers(SESSION_INDEX_KEY)  # type: ignore[misc]
 
         for state_key in state_keys:
             parts = state_key.split(":", 1)
@@ -252,7 +249,7 @@ class RedisSessionStore:
                     sessions.append(session)
                 else:
                     # Clean up stale index entry
-                    await self._client.srem(SESSION_INDEX_KEY, state_key)
+                    await client.srem(SESSION_INDEX_KEY, state_key)  # type: ignore[misc]
 
         return sessions
 
@@ -265,16 +262,15 @@ class RedisSessionStore:
         Returns:
             True if session existed and was deleted
         """
-        if not self._client:
-            await self.connect()
+        client = await self.connect()
 
         key = self._session_key(client_id, device_id)
         state_key = f"{client_id}:{device_id}"
 
         # Remove from index
-        await self._client.srem(SESSION_INDEX_KEY, state_key)
+        await client.srem(SESSION_INDEX_KEY, state_key)  # type: ignore[misc]
 
         # Delete session data
-        deleted = await self._client.delete(key)
+        deleted: int = await client.delete(key)
 
         return deleted > 0

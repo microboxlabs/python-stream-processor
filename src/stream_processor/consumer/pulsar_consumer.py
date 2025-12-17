@@ -55,8 +55,8 @@ class StreamProcessorConsumer:
         )
 
         # Pulsar client and consumer (initialized on run)
-        self.client = None
-        self.consumer = None
+        self.client: pulsar.Client | None = None
+        self.consumer: pulsar.Consumer | None = None
         self.running = False
 
         # Segment generation lock per device
@@ -172,6 +172,10 @@ class StreamProcessorConsumer:
 
     async def _handle_message(self, msg) -> None:
         """Handle a single Pulsar message."""
+        if self.consumer is None:
+            logger.error("Consumer not initialized")
+            return
+
         try:
             # Parse message
             data = json.loads(msg.data().decode("utf-8"))
@@ -238,6 +242,7 @@ class StreamProcessorConsumer:
 
             # Create Pulsar client
             self.client = pulsar.Client(self.config.service_url)
+            assert self.client is not None  # For type checker
 
             # Create consumer with Key_Shared subscription
             self.consumer = self.client.subscribe(
@@ -261,6 +266,7 @@ class StreamProcessorConsumer:
             while self.running:
                 try:
                     # Receive message with timeout
+                    assert self.consumer is not None  # For type checker
                     msg = self.consumer.receive(timeout_millis=1000)
                     await self._handle_message(msg)
 
