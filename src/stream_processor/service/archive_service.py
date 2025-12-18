@@ -255,15 +255,16 @@ class ArchiveService:
         await pool.execute(
             """
             INSERT INTO deferred_transmissions (
-                client_id, device_id, session_id,
+                client_id, device_id, session_id, owner_client_id,
                 started_at, ended_at, duration_seconds,
                 first_segment_number, last_segment_number, segment_count,
                 archive_path, status, expires_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ready', $11)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ready', $12)
             """,
             session.client_id,
             session.device_id,
             session.session_id,
+            session.client_id,  # owner_client_id = client_id (device is directly connected)
             session.started_at,
             session.last_frame_at,
             session.duration_seconds,
@@ -288,17 +289,18 @@ class ArchiveService:
             await pool.execute(
                 """
                 INSERT INTO deferred_transmissions (
-                    client_id, device_id, session_id,
+                    client_id, device_id, session_id, owner_client_id,
                     started_at, ended_at, duration_seconds,
                     first_segment_number, last_segment_number, segment_count,
                     archive_path, status, expires_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'failed', $11)
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'failed', $12)
                 ON CONFLICT (client_id, device_id, session_id)
                 DO UPDATE SET status = 'failed', updated_at = CURRENT_TIMESTAMP
                 """,
                 session.client_id,
                 session.device_id,
                 session.session_id,
+                session.client_id,  # owner_client_id = client_id (device is directly connected)
                 session.started_at,
                 session.last_frame_at,
                 session.duration_seconds,
