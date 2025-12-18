@@ -2,6 +2,11 @@
 """
 Migration script to upload local storage data to GCS and create deferred transmissions.
 
+Handles symlink-based device sharing:
+- Owner clients have real device directories
+- Shared clients have symlinks pointing to owner's devices
+- Data is uploaded once (from owner), but DB entries are created for all clients
+
 Usage:
     python scripts/migrate_local_to_gcs.py --source /path/to/local/storage --dry-run
     python scripts/migrate_local_to_gcs.py --source /path/to/local/storage
@@ -16,11 +21,31 @@ import asyncio
 import os
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import asyncpg
 from google.cloud import storage
+
+
+@dataclass
+class DeviceInfo:
+    """Information about a device and its data."""
+
+    owner_client_id: str
+    device_id: str
+    path: Path  # Real path (resolved symlinks)
+    frames_path: Path
+    segments_path: Path
+    frame_count: int
+    segment_count: int
+    # Clients that share this device (including owner)
+    shared_clients: list[str] = field(default_factory=list)
+    # Secondary keys pointing to this device (client_id -> list of keys)
+    secondary_keys: dict[str, list[str]] = field(default_factory=dict)
+    # Request IDs pointing to this device (client_id -> list of request_ids)
+    request_ids: dict[str, list[str]] = field(default_factory=dict)
 
 
 def parse_frame_timestamp(filename: str) -> datetime | None:
@@ -45,15 +70,46 @@ def parse_segment_number(filename: str) -> int | None:
     return None
 
 
-def discover_devices(source_path: Path) -> list[dict]:
-    """Discover all devices with data in the source storage."""
-    devices = []
+def resolve_symlink_target(symlink_path: Path, base_path: Path) -> tuple[str, str] | None:
+    """
+    Resolve a device symlink to get owner_client_id and device_id.
+
+    Returns (owner_client_id, device_id) or None if not resolvable.
+    """
+    try:
+        # Get the symlink target (e.g., "../../PdMZi.../device_id/2c_f7_f1...")
+        target = os.readlink(symlink_path)
+
+        # Resolve to absolute path
+        resolved = (symlink_path.parent / target).resolve()
+
+        # Extract client_id and device_id from path
+        # Path format: .../client_ids/{client_id}/device_id/{device_id}
+        parts = resolved.parts
+        for i, part in enumerate(parts):
+            if part == "client_ids" and i + 3 < len(parts):
+                if parts[i + 2] == "device_id":
+                    return parts[i + 1], parts[i + 3]
+        return None
+    except (OSError, ValueError):
+        return None
+
+
+def discover_devices(source_path: Path) -> dict[str, DeviceInfo]:
+    """
+    Discover all devices with data in the source storage.
+
+    Returns a dict keyed by "{owner_client_id}:{device_id}" with DeviceInfo.
+    Handles symlinks to avoid duplicates.
+    """
+    devices: dict[str, DeviceInfo] = {}
     client_ids_path = source_path / "client_ids"
 
     if not client_ids_path.exists():
         print(f"No client_ids directory found at {client_ids_path}")
         return devices
 
+    # First pass: find all real device directories (owners)
     for client_dir in client_ids_path.iterdir():
         if not client_dir.is_dir():
             continue
@@ -66,9 +122,15 @@ def discover_devices(source_path: Path) -> list[dict]:
         for device_dir in device_id_path.iterdir():
             if not device_dir.is_dir():
                 continue
+
             device_id = device_dir.name
 
-            # Check for actual content
+            # Check if this is a symlink (shared device) or real directory (owner)
+            if device_dir.is_symlink():
+                # This is a shared device - will process in second pass
+                continue
+
+            # This is a real directory (owner)
             frames_path = device_dir / "frames"
             hls_path = device_dir / "hls"
             segments_path = hls_path / "segments"
@@ -77,17 +139,77 @@ def discover_devices(source_path: Path) -> list[dict]:
             segment_files = list(segments_path.glob("*.ts")) if segments_path.exists() else []
 
             if frame_files or segment_files:
-                devices.append(
-                    {
-                        "client_id": client_id,
-                        "device_id": device_id,
-                        "path": device_dir,
-                        "frames_path": frames_path,
-                        "segments_path": segments_path,
-                        "frame_count": len(frame_files),
-                        "segment_count": len(segment_files),
-                    }
+                key = f"{client_id}:{device_id}"
+                devices[key] = DeviceInfo(
+                    owner_client_id=client_id,
+                    device_id=device_id,
+                    path=device_dir,
+                    frames_path=frames_path,
+                    segments_path=segments_path,
+                    frame_count=len(frame_files),
+                    segment_count=len(segment_files),
+                    shared_clients=[client_id],  # Owner is always included
+                    secondary_keys={},
+                    request_ids={},
                 )
+
+    # Second pass: find shared devices (symlinks) and secondary_key/request_id mappings
+    for client_dir in client_ids_path.iterdir():
+        if not client_dir.is_dir():
+            continue
+        client_id = client_dir.name
+
+        # Check device_id symlinks
+        device_id_path = client_dir / "device_id"
+        if device_id_path.exists():
+            for device_entry in device_id_path.iterdir():
+                if device_entry.is_symlink():
+                    result = resolve_symlink_target(device_entry, source_path)
+                    if result:
+                        owner_client_id, device_id = result
+                        key = f"{owner_client_id}:{device_id}"
+                        if key in devices:
+                            if client_id not in devices[key].shared_clients:
+                                devices[key].shared_clients.append(client_id)
+
+        # Check secondary_key symlinks
+        secondary_key_path = client_dir / "secondary_key"
+        if secondary_key_path.exists():
+            for key_entry in secondary_key_path.iterdir():
+                if key_entry.is_symlink():
+                    # secondary_key links to ../device_id/{device_id}
+                    try:
+                        target = os.readlink(key_entry)
+                        # Extract device_id from target like "../device_id/2c_f7_f1..."
+                        if "../device_id/" in target:
+                            device_id = target.split("../device_id/")[1]
+                            # Find the owner for this device
+                            for dev_info in devices.values():
+                                if dev_info.device_id == device_id:
+                                    if client_id not in dev_info.secondary_keys:
+                                        dev_info.secondary_keys[client_id] = []
+                                    dev_info.secondary_keys[client_id].append(key_entry.name)
+                                    break
+                    except (OSError, IndexError):
+                        pass
+
+        # Check request_id symlinks
+        # request_id_path = client_dir / "request_id"
+        # if request_id_path.exists():
+        #     for req_entry in request_id_path.iterdir():
+        #         if req_entry.is_symlink():
+        #             try:
+        #                 target = os.readlink(req_entry)
+        #                 if "../device_id/" in target:
+        #                     device_id = target.split("../device_id/")[1]
+        #                     for dev_info in devices.values():
+        #                         if dev_info.device_id == device_id:
+        #                             if client_id not in dev_info.request_ids:
+        #                                 dev_info.request_ids[client_id] = []
+        #                             dev_info.request_ids[client_id].append(req_entry.name)
+        #                             break
+        #             except (OSError, IndexError):
+        #                 pass
 
     return devices
 
@@ -174,31 +296,40 @@ def analyze_frames(frames_path: Path) -> dict:
 
 
 async def upload_to_gcs(
-    source_path: Path,
-    devices: list[dict],
+    devices: dict[str, DeviceInfo],
     bucket_name: str,
     dry_run: bool = True,
 ) -> dict:
-    """Upload files to GCS."""
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
+    """
+    Upload files to GCS.
 
+    Only uploads from owner's real directories (not symlinks).
+    """
     stats = {"uploaded": 0, "skipped": 0, "errors": 0, "bytes": 0}
 
-    for device in devices:
-        client_id = device["client_id"]
-        device_id = device["device_id"]
+    if not dry_run:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+    else:
+        bucket = None
 
-        print(f"\n{'[DRY-RUN] ' if dry_run else ''}Processing {client_id}/{device_id}")
+    for device in devices.values():
+        owner_client_id = device.owner_client_id
+        device_id = device.device_id
 
-        # Upload frames
-        if device["frames_path"].exists():
-            for frame_file in device["frames_path"].glob("*.jpg"):
-                gcs_path = f"client_ids/{client_id}/device_id/{device_id}/frames/{frame_file.name}"
+        print(f"\n{'[DRY-RUN] ' if dry_run else ''}Uploading {owner_client_id}/{device_id}")
+        print(f"  Shared with: {device.shared_clients}")
+
+        # Upload frames (only from owner's path)
+        if device.frames_path.exists():
+            frame_count = 0
+            for frame_file in device.frames_path.glob("*.jpg"):
+                gcs_path = (
+                    f"client_ids/{owner_client_id}/device_id/{device_id}/frames/{frame_file.name}"
+                )
 
                 if dry_run:
-                    print(f"  Would upload: {frame_file.name} -> {gcs_path}")
-                    stats["skipped"] += 1
+                    frame_count += 1
                 else:
                     try:
                         blob = bucket.blob(gcs_path)
@@ -211,17 +342,18 @@ async def upload_to_gcs(
                     except Exception as e:
                         print(f"  Error uploading {frame_file.name}: {e}")
                         stats["errors"] += 1
+            if dry_run:
+                print(f"  Would upload {frame_count} frames")
+                stats["skipped"] += frame_count
 
-        # Upload segments
-        if device["segments_path"].exists():
-            for seg_file in device["segments_path"].glob("*.ts"):
-                gcs_path = (
-                    f"client_ids/{client_id}/device_id/{device_id}/hls/segments/{seg_file.name}"
-                )
+        # Upload segments (only from owner's path)
+        if device.segments_path.exists():
+            seg_count = 0
+            for seg_file in device.segments_path.glob("*.ts"):
+                gcs_path = f"client_ids/{owner_client_id}/device_id/{device_id}/hls/segments/{seg_file.name}"
 
                 if dry_run:
-                    print(f"  Would upload: {seg_file.name} -> {gcs_path}")
-                    stats["skipped"] += 1
+                    seg_count += 1
                 else:
                     try:
                         blob = bucket.blob(gcs_path)
@@ -234,40 +366,49 @@ async def upload_to_gcs(
                     except Exception as e:
                         print(f"  Error uploading {seg_file.name}: {e}")
                         stats["errors"] += 1
+            if dry_run:
+                print(f"  Would upload {seg_count} segments")
+                stats["skipped"] += seg_count
 
     return stats
 
 
 async def create_deferred_transmissions(
-    devices: list[dict],
+    devices: dict[str, DeviceInfo],
     bucket_name: str,
     database_url: str,
     segment_duration: int = 30,
     retention_days: int = 7,
     dry_run: bool = True,
 ) -> list[dict]:
-    """Create deferred transmission archives from existing segments."""
+    """
+    Create deferred transmission archives from existing segments.
+
+    Creates archive files once (for owner), then creates DB entries for ALL
+    clients that share the device.
+    """
     created_archives = []
 
     if dry_run:
         print("\n[DRY-RUN] Would create deferred transmissions:")
+        conn = None
+        bucket = None
     else:
         conn = await asyncpg.connect(database_url)
-
-    client = storage.Client()
-    bucket = client.bucket(bucket_name)
+        gcs_client = storage.Client()
+        bucket = gcs_client.bucket(bucket_name)
 
     try:
-        for device in devices:
-            client_id = device["client_id"]
-            device_id = device["device_id"]
+        for device in devices.values():
+            owner_client_id = device.owner_client_id
+            device_id = device.device_id
 
-            segment_info = analyze_segments(device["segments_path"])
+            segment_info = analyze_segments(device.segments_path)
             if not segment_info or not segment_info.get("sessions"):
-                print(f"  No segments found for {client_id}/{device_id}")
+                print(f"  No segments found for {owner_client_id}/{device_id}")
                 continue
 
-            frame_info = analyze_frames(device["frames_path"])
+            frame_info = analyze_frames(device.frames_path)
 
             # Create an archive for each session
             for session_segments in segment_info["sessions"]:
@@ -278,12 +419,11 @@ async def create_deferred_transmissions(
                 first_seg = session_segments[0]
                 last_seg = session_segments[-1]
 
-                # Estimate start/end times from segment mtimes and frame timestamps
+                # Estimate start/end times
                 if frame_info:
                     started_at = frame_info["earliest"]
                     ended_at = frame_info["latest"]
                 else:
-                    # Fall back to segment file modification times
                     started_at = first_seg["mtime"]
                     ended_at = last_seg["mtime"]
 
@@ -296,7 +436,7 @@ async def create_deferred_transmissions(
 
                 archive_info = {
                     "session_id": session_id,
-                    "client_id": client_id,
+                    "owner_client_id": owner_client_id,
                     "device_id": device_id,
                     "started_at": started_at,
                     "ended_at": ended_at,
@@ -305,22 +445,23 @@ async def create_deferred_transmissions(
                     "last_segment": last_seg["number"],
                     "segment_count": len(session_segments),
                     "archive_path": archive_path,
-                    "expires_at": expires_at,
+                    "shared_clients": device.shared_clients,
                 }
 
                 if dry_run:
                     print(f"\n  Session: {session_id}")
-                    print(f"    Client: {client_id}, Device: {device_id}")
+                    print(f"    Owner: {owner_client_id}, Device: {device_id}")
                     print(f"    Started: {started_at}, Ended: {ended_at}")
                     print(f"    Duration: {duration_seconds}s, Segments: {len(session_segments)}")
-                    print(f"    Segment range: {first_seg['number']} - {last_seg['number']}")
+                    print(f"    Shared with clients: {device.shared_clients}")
+                    print(f"    Would create DB entries for {len(device.shared_clients)} client(s)")
                 else:
-                    # Copy segments to archive directory
                     print(f"\n  Creating archive {session_id}")
 
+                    # Copy segments to archive directory (once, for owner only)
                     for seg in session_segments:
-                        src_path = f"client_ids/{client_id}/device_id/{device_id}/hls/segments/{seg['path'].name}"
-                        dst_path = f"client_ids/{client_id}/device_id/{device_id}/{archive_path}/segments/{seg['path'].name}"
+                        src_path = f"client_ids/{owner_client_id}/device_id/{device_id}/hls/segments/{seg['path'].name}"
+                        dst_path = f"client_ids/{owner_client_id}/device_id/{device_id}/{archive_path}/segments/{seg['path'].name}"
 
                         src_blob = bucket.blob(src_path)
                         dst_blob = bucket.blob(dst_path)
@@ -328,12 +469,12 @@ async def create_deferred_transmissions(
                         if src_blob.exists() and not dst_blob.exists():
                             bucket.copy_blob(src_blob, bucket, dst_path)
 
-                    # Generate VOD playlist
+                    # Generate VOD playlist (once, for owner only)
                     playlist_lines = [
                         "#EXTM3U",
                         "#EXT-X-VERSION:3",
-                        "#EXT-X-TARGETDURATION:" + str(segment_duration),
-                        "#EXT-X-MEDIA-SEQUENCE:" + str(first_seg["number"]),
+                        f"#EXT-X-TARGETDURATION:{segment_duration}",
+                        f"#EXT-X-MEDIA-SEQUENCE:{first_seg['number']}",
                         "#EXT-X-PLAYLIST-TYPE:VOD",
                     ]
 
@@ -344,50 +485,152 @@ async def create_deferred_transmissions(
                     playlist_lines.append("#EXT-X-ENDLIST")
                     playlist_content = "\n".join(playlist_lines)
 
-                    playlist_path = (
-                        f"client_ids/{client_id}/device_id/{device_id}/{archive_path}/playlist.m3u8"
-                    )
+                    playlist_path = f"client_ids/{owner_client_id}/device_id/{device_id}/{archive_path}/playlist.m3u8"
                     playlist_blob = bucket.blob(playlist_path)
                     playlist_blob.upload_from_string(
                         playlist_content, content_type="application/vnd.apple.mpegurl"
                     )
 
-                    # Insert into database
-                    await conn.execute(
-                        """
-                        INSERT INTO deferred_transmissions (
-                            client_id, device_id, session_id, started_at, ended_at,
-                            duration_seconds, first_segment_number, last_segment_number,
-                            segment_count, archive_path, status, expires_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'ready', $11)
-                        ON CONFLICT (client_id, device_id, session_id) DO NOTHING
-                        """,
-                        client_id,
-                        device_id,
-                        session_id,
-                        started_at,
-                        ended_at,
-                        duration_seconds,
-                        first_seg["number"],
-                        last_seg["number"],
-                        len(session_segments),
-                        archive_path,
-                        expires_at,
-                    )
-
                     print(f"    Copied {len(session_segments)} segments, created playlist")
+
+                    # Create DB entries for ALL clients that share this device
+                    for client_id in device.shared_clients:
+                        await conn.execute(
+                            """
+                            INSERT INTO deferred_transmissions (
+                                client_id, device_id, session_id, owner_client_id,
+                                started_at, ended_at, duration_seconds,
+                                first_segment_number, last_segment_number,
+                                segment_count, archive_path, status, expires_at
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ready', $12)
+                            ON CONFLICT (client_id, device_id, session_id) DO NOTHING
+                            """,
+                            client_id,
+                            device_id,
+                            session_id,
+                            owner_client_id,  # Always use the owner's client_id for storage path
+                            started_at,
+                            ended_at,
+                            duration_seconds,
+                            first_seg["number"],
+                            last_seg["number"],
+                            len(session_segments),
+                            archive_path,
+                            expires_at,
+                        )
+                        print(f"    Created DB entry for client: {client_id}")
 
                 created_archives.append(archive_info)
 
     finally:
-        if not dry_run:
+        if conn:
             await conn.close()
 
     return created_archives
 
 
+async def populate_symlink_tables(
+    devices: dict[str, DeviceInfo],
+    database_url: str,
+    dry_run: bool = True,
+) -> dict:
+    """
+    Populate stream_shared_devices and stream_index_mappings tables.
+
+    These tables store the symlink relationships for GCS mode.
+    """
+    stats = {"shared_devices": 0, "index_mappings": 0}
+
+    if dry_run:
+        print("\n[DRY-RUN] Would populate symlink tables:")
+        for device in devices.values():
+            owner = device.owner_client_id
+            device_id = device.device_id
+
+            # Shared devices (excluding owner)
+            shared_count = len([c for c in device.shared_clients if c != owner])
+            if shared_count > 0:
+                print(f"  stream_shared_devices: {owner}/{device_id} -> {shared_count} shares")
+                stats["shared_devices"] += shared_count
+
+            # Secondary keys
+            for client_id, keys in device.secondary_keys.items():
+                print(f"  stream_index_mappings (secondary_key): {client_id} -> {len(keys)} keys")
+                stats["index_mappings"] += len(keys)
+
+            # Request IDs - commented out as per user's file modification
+            # for client_id, req_ids in device.request_ids.items():
+            #     print(f"  stream_index_mappings (request_id): {client_id} -> {len(req_ids)} ids")
+            #     stats["index_mappings"] += len(req_ids)
+
+        return stats
+
+    conn = await asyncpg.connect(database_url)
+    try:
+        for device in devices.values():
+            owner = device.owner_client_id
+            device_id = device.device_id
+
+            # Insert shared device records (for non-owner clients)
+            for shared_client in device.shared_clients:
+                if shared_client != owner:
+                    await conn.execute(
+                        """
+                        INSERT INTO stream_shared_devices (owner_client_id, shared_client_id, device_id)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (owner_client_id, shared_client_id, device_id) DO NOTHING
+                        """,
+                        owner,
+                        shared_client,
+                        device_id,
+                    )
+                    stats["shared_devices"] += 1
+                    print(f"  Created shared_device: {owner}/{device_id} -> {shared_client}")
+
+            # Insert secondary_key mappings
+            for client_id, keys in device.secondary_keys.items():
+                for key in keys:
+                    await conn.execute(
+                        """
+                        INSERT INTO stream_index_mappings
+                            (client_id, index_type, index_key, target_device_id)
+                        VALUES ($1, 'secondary_key', $2, $3)
+                        ON CONFLICT (client_id, index_type, index_key) DO NOTHING
+                        """,
+                        client_id,
+                        key,
+                        device_id,
+                    )
+                    stats["index_mappings"] += 1
+                    print(f"  Created secondary_key mapping: {client_id}/{key} -> {device_id}")
+
+            # Request IDs - commented out as per user's file modification
+            # for client_id, req_ids in device.request_ids.items():
+            #     for req_id in req_ids:
+            #         await conn.execute(
+            #             """
+            #             INSERT INTO stream_index_mappings
+            #                 (client_id, index_type, index_key, target_device_id)
+            #             VALUES ($1, 'request_id', $2, $3)
+            #             ON CONFLICT (client_id, index_type, index_key) DO NOTHING
+            #             """,
+            #             client_id,
+            #             req_id,
+            #             device_id,
+            #         )
+            #         stats["index_mappings"] += 1
+            #         print(f"  Created request_id mapping: {client_id}/{req_id} -> {device_id}")
+
+    finally:
+        await conn.close()
+
+    return stats
+
+
 async def main():
-    parser = argparse.ArgumentParser(description="Migrate local storage to GCS")
+    parser = argparse.ArgumentParser(
+        description="Migrate local storage to GCS with symlink support"
+    )
     parser.add_argument(
         "--source",
         type=Path,
@@ -435,39 +678,58 @@ async def main():
     print(f"Database: {database_url[:50]}..." if database_url else "Database: N/A")
     print(f"Dry run: {args.dry_run}")
 
-    # Discover devices
-    print("\n=== Discovering devices ===")
+    # Discover devices (handles symlinks)
+    print("\n=== Discovering devices (with symlink resolution) ===")
     devices = discover_devices(args.source)
 
     if not devices:
         print("No devices with data found")
         return 0
 
-    for device in devices:
-        print(f"\nDevice: {device['client_id']}/{device['device_id']}")
-        print(f"  Frames: {device['frame_count']}")
-        print(f"  Segments: {device['segment_count']}")
+    for device in devices.values():
+        print(f"\nDevice: {device.owner_client_id}/{device.device_id}")
+        print(f"  Owner: {device.owner_client_id}")
+        print(f"  Frames: {device.frame_count}")
+        print(f"  Segments: {device.segment_count}")
+        print(f"  Shared with clients: {device.shared_clients}")
 
-        segment_info = analyze_segments(device["segments_path"])
+        if device.secondary_keys:
+            for client_id, keys in device.secondary_keys.items():
+                print(f"  Secondary keys ({client_id}): {len(keys)} keys")
+
+        if device.request_ids:
+            for client_id, req_ids in device.request_ids.items():
+                print(f"  Request IDs ({client_id}): {len(req_ids)} requests")
+
+        segment_info = analyze_segments(device.segments_path)
         if segment_info:
             print(
                 f"  Segment range: {segment_info['first_segment']} - {segment_info['last_segment']}"
             )
             print(f"  Sessions: {len(segment_info.get('sessions', []))}")
 
-        frame_info = analyze_frames(device["frames_path"])
+        frame_info = analyze_frames(device.frames_path)
         if frame_info:
             print(f"  Time range: {frame_info['earliest']} to {frame_info['latest']}")
             print(f"  Duration: {frame_info['duration_seconds']:.0f}s")
 
-    # Upload to GCS
+    # Upload to GCS (only from owner directories)
     if not args.skip_upload:
-        print("\n=== Uploading to GCS ===")
-        upload_stats = await upload_to_gcs(args.source, devices, bucket_name, args.dry_run)
+        print("\n=== Uploading to GCS (owner directories only) ===")
+        upload_stats = await upload_to_gcs(devices, bucket_name, args.dry_run)
         print(f"\nUpload stats: {upload_stats}")
 
-    # Create deferred transmissions
-    print("\n=== Creating deferred transmissions ===")
+    # Populate symlink tables (for GCS mode)
+    print("\n=== Populating symlink tables ===")
+    symlink_stats = await populate_symlink_tables(
+        devices,
+        database_url or "",
+        args.dry_run,
+    )
+    print(f"\nSymlink table stats: {symlink_stats}")
+
+    # Create deferred transmissions (for all clients)
+    print("\n=== Creating deferred transmissions (for all shared clients) ===")
     archives = await create_deferred_transmissions(
         devices,
         bucket_name,
