@@ -13,6 +13,7 @@ from ..config.settings import settings
 from ..model.events import DeviceState, FrameEvent
 from ..service.hls_generator import HLSGenerator
 from ..service.redis_session_store import RedisSessionStore
+from ..service.storage_backend import sanitize_path_component
 from ..utils.logger import get_logger
 from ..utils.metrics import (
     active_devices_gauge,
@@ -102,7 +103,7 @@ class StreamProcessorConsumer:
         Accumulates frames and triggers segment generation when threshold is reached.
         """
         client_id = event.client_id
-        device_id = event.device_id
+        device_id = sanitize_path_component(event.device_id)
         state_key = f"{client_id}:{device_id}"
         lock = self._get_device_lock(state_key)
 
