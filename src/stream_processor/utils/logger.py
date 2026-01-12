@@ -11,7 +11,7 @@ import structlog
 
 def get_log_level() -> int:
     """Get log level from LOG_LEVEL environment variable.
-    
+
     Valid values: DEBUG, INFO, WARNING, ERROR, CRITICAL
     Default: INFO
     """
