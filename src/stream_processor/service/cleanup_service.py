@@ -7,7 +7,7 @@ Supports both filesystem and GCS storage backends.
 
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ..config.settings import settings
 from ..utils.logger import get_logger
@@ -92,7 +92,7 @@ class CleanupService:
         start_time = time.time()
 
         # Calculate cutoff time
-        cutoff_time = datetime.utcnow() - timedelta(hours=self.retention_hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.retention_hours)  # noqa: UP017
         cutoff_timestamp = cutoff_time.timestamp()
 
         total_deleted = 0
