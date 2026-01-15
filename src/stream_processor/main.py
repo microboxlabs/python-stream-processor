@@ -82,6 +82,12 @@ Examples:
         help="Clean up old HLS segments and frames (runs once, for CronJob use)",
     )
 
+    # Archive cleanup command (for CronJob use)
+    subparsers.add_parser(
+        "archive-cleanup",
+        help="Clean up expired archives (runs once, for CronJob use)",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -97,6 +103,8 @@ Examples:
         run_offline_checker(continuous=continuous, interval=interval)
     elif args.command == "cleanup":
         run_cleanup()
+    elif args.command == "archive-cleanup":
+        run_archive_cleanup()
     else:
         parser.print_help()
         sys.exit(1)
@@ -191,6 +199,38 @@ def run_cleanup() -> None:
         logger.error(f"Cleanup error: {e}", exc_info=True)
         sys.exit(1)
     finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+def run_archive_cleanup() -> None:
+    """Run cleanup of expired archives (one-shot, for CronJob use)."""
+    from .service.archive_service import ArchiveService
+
+    logger.info("=" * 80)
+    logger.info("Stream Processor - Archive Cleanup (One-Shot Mode)")
+    logger.info(f"Retention: {settings.archive.retention_days} days")
+    logger.info("=" * 80)
+
+    archive_service = ArchiveService()
+
+    # Run archive cleanup once
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        deleted = loop.run_until_complete(archive_service.cleanup_expired_archives())
+        if deleted > 0:
+            logger.info(f"Archive cleanup complete: {deleted} expired archive(s) deleted")
+        else:
+            logger.info("Archive cleanup complete: no expired archives to delete")
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Archive cleanup error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        loop.run_until_complete(archive_service.close())
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
