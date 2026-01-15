@@ -177,17 +177,21 @@ class WatermarkService:
         if file_data is None:
             raise FileNotFoundError(f"Frame not found in storage: {gcs_path}")
 
-        # Create a temporary file for the watermarked output
-        # Don't delete it automatically - let HLSGenerator clean it up after FFmpeg processing
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
-            tmp_out_path = Path(tmp_out.name)
-
-        # Create temp input file for Pillow processing
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_in:
-            tmp_in.write(file_data)
-            tmp_in_path = Path(tmp_in.name)
+        # Initialize path variables for cleanup
+        tmp_in_path: Path | None = None
+        tmp_out_path: Path | None = None
 
         try:
+            # Create temp input file for Pillow processing
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_in:
+                tmp_in.write(file_data)
+                tmp_in_path = Path(tmp_in.name)
+
+            # Create a temporary file for the watermarked output
+            # Don't delete it automatically - let HLSGenerator clean it up after FFmpeg processing
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+                tmp_out_path = Path(tmp_out.name)
+
             # Apply watermark to the temporary file
             with Image.open(tmp_in_path) as image:
                 # Create drawing context
@@ -227,7 +231,12 @@ class WatermarkService:
             # FFmpeg will read this file, then HLSGenerator will clean it up
             return str(tmp_out_path)
 
+        except Exception:
+            # If an error occurs, clean up both temp files
+            if tmp_out_path and tmp_out_path.exists():
+                tmp_out_path.unlink()
+            raise
         finally:
-            # Clean up input temp file (we only need the output)
-            if tmp_in_path.exists():
+            # Always clean up input temp file (we only need the output)
+            if tmp_in_path and tmp_in_path.exists():
                 tmp_in_path.unlink()
