@@ -3,12 +3,14 @@ Watermark service for adding timestamp overlays to video frames.
 """
 
 import asyncio
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from stream_processor.config.settings import WatermarkConfig
+from stream_processor.config.settings import WatermarkConfig, settings
+from stream_processor.service.storage_backend import get_storage_backend
 
 
 class WatermarkService:
@@ -18,6 +20,7 @@ class WatermarkService:
         """Initialize watermark service with configuration."""
         self.config = config
         self._font = None
+        self.storage = get_storage_backend(settings.storage)
 
     def _get_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """Get font for watermark text."""
@@ -93,6 +96,13 @@ class WatermarkService:
         output_path: str | Path | None = None,
     ) -> str:
         """Synchronous watermark implementation."""
+        frame_path_str = str(frame_path)
+
+        # Check if this is a GCS path
+        if frame_path_str.startswith("gs://"):
+            return self._add_watermark_gcs(frame_path_str, timestamp)
+
+        # Handle filesystem paths
         frame_path = Path(frame_path)
         if output_path is None:
             output_path = frame_path
@@ -135,3 +145,87 @@ class WatermarkService:
             image.save(output_path, quality=95)
 
         return str(output_path)
+
+    def _add_watermark_gcs(self, gcs_path: str, timestamp: datetime) -> str:
+        """Apply watermark to a GCS-stored frame."""
+        import re
+
+        # Parse GCS path: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
+        # Expected format: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
+        match = re.match(r"gs://[^/]+/client_ids/([^/]+)/device_id/([^/]+)/(.+)", gcs_path)
+
+        if not match:
+            raise ValueError(f"Invalid GCS path format: {gcs_path}")
+
+        client_id = match.group(1)
+        device_id = match.group(2)
+        subpath = match.group(3)
+
+        # Download the file from GCS
+        file_data = self.storage.read_file(client_id, device_id, subpath)
+        if file_data is None:
+            raise FileNotFoundError(f"Frame not found in storage: {gcs_path}")
+
+        # Create a temporary file for processing
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_in:
+            tmp_in.write(file_data)
+            tmp_in_path = Path(tmp_in.name)
+
+        try:
+            # Create another temp file for output
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+                tmp_out_path = Path(tmp_out.name)
+
+            try:
+                # Apply watermark to the temporary file
+                with Image.open(tmp_in_path) as image:
+                    # Create drawing context
+                    draw = ImageDraw.Draw(image, mode="RGBA")
+
+                    # Get font
+                    font = self._get_font(self.config.font_size)
+
+                    # Format timestamp text
+                    text = self._format_timestamp(timestamp)
+
+                    # Get text bounding box
+                    text_bbox = draw.textbbox((0, 0), text, font=font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    text_height = text_bbox[3] - text_bbox[1]
+
+                    # Calculate position
+                    x, y = self._get_position(image.width, image.height, text_bbox)
+
+                    # Draw semi-transparent background
+                    bg_padding = 5
+                    bg_rect = [
+                        x - bg_padding,
+                        y - bg_padding,
+                        x + text_width + bg_padding,
+                        y + text_height + bg_padding,
+                    ]
+                    draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
+
+                    # Draw white text
+                    draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
+
+                    # Save to temp output file
+                    image.save(tmp_out_path, quality=95)
+
+                # Upload the watermarked image back to GCS
+                watermarked_data = tmp_out_path.read_bytes()
+                self.storage.write_file(
+                    client_id, device_id, subpath, watermarked_data, content_type="image/jpeg"
+                )
+
+                return gcs_path
+
+            finally:
+                # Clean up output temp file
+                if tmp_out_path.exists():
+                    tmp_out_path.unlink()
+
+        finally:
+            # Clean up input temp file
+            if tmp_in_path.exists():
+                tmp_in_path.unlink()
