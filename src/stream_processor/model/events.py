@@ -4,7 +4,7 @@ Event models for stream processing.
 
 from datetime import UTC, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LocationData(BaseModel):
@@ -23,12 +23,28 @@ class FrameEvent(BaseModel):
     client_id: str = Field(alias="clientId", description="Client identifier (from JWT)")
     device_id: str = Field(alias="deviceId", description="Device identifier")
     timestamp: datetime = Field(description="Frame capture timestamp")
+    request_timestamp: datetime | None = Field(
+        default=None,
+        alias="requestTimestamp",
+        description="HTTP request timestamp (Unix epoch seconds)",
+    )
     frame_path: str = Field(alias="framePath", description="Path to frame image on shared storage")
     request_id: str = Field(alias="requestId", description="Request identifier for tracking")
     secondary_key: str | None = Field(
         default=None, alias="secondaryKey", description="Secondary index key"
     )
     location: LocationData | None = None
+
+    @field_validator("request_timestamp", mode="before")
+    @classmethod
+    def parse_request_timestamp(cls, v: int | float | datetime | None) -> datetime | None:
+        """Convert Unix epoch seconds to datetime if needed."""
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        # Convert Unix epoch seconds to datetime
+        return datetime.fromtimestamp(v, tz=UTC)
 
 
 class DeviceState(BaseModel):

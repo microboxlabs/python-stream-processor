@@ -15,6 +15,7 @@ from ..model.events import DeviceState, FrameEvent
 from ..service.hls_generator import HLSGenerator
 from ..service.redis_session_store import RedisSessionStore
 from ..service.storage_backend import sanitize_path_component
+from ..service.watermark_service import WatermarkService
 from ..utils.logger import get_log_level, get_logger
 from ..utils.metrics import (
     active_devices_gauge,
@@ -44,12 +45,19 @@ class StreamProcessorConsumer:
         self.config = settings.pulsar
         self.processing_config = settings.processing
         self.archive_config = settings.archive
+        self.watermark_config = settings.watermark
 
         # Device state tracking (in-memory)
         self.device_states: dict[str, DeviceState] = {}
 
         # HLS generator service
         self.hls_generator = HLSGenerator()
+
+        # Watermark service (only initialized if enabled)
+        self.watermark_service: WatermarkService | None = None
+        if self.watermark_config.enabled:
+            self.watermark_service = WatermarkService(self.watermark_config)
+            logger.info("Watermark service enabled")
 
         # Thread pool for FFmpeg workers
         self.executor = ThreadPoolExecutor(
@@ -108,11 +116,26 @@ class StreamProcessorConsumer:
         state_key = f"{client_id}:{device_id}"
         lock = self._get_device_lock(state_key)
 
+        # Apply watermark if enabled
+        frame_path = event.frame_path
+        if self.watermark_service and event.request_timestamp:
+            try:
+                # Use request_timestamp if available, otherwise fall back to timestamp
+                timestamp = event.request_timestamp
+                frame_path = await self.watermark_service.add_timestamp_watermark(
+                    event.frame_path, timestamp
+                )
+                logger.debug(f"Watermark applied to {frame_path}")
+            except Exception as e:
+                logger.error(f"Failed to apply watermark to {event.frame_path}: {e}", exc_info=True)
+                # Continue with original frame path if watermarking fails
+                frame_path = event.frame_path
+
         async with lock:
             state = self._get_or_create_state(client_id, device_id)
 
             # Add frame to pending
-            state.add_frame(event.frame_path, event.timestamp)
+            state.add_frame(frame_path, event.timestamp)
             frames_received_total.labels(device_id=state_key).inc()
 
             # Update session activity in Redis (for offline-checker service)
@@ -120,7 +143,7 @@ class StreamProcessorConsumer:
                 await self.session_store.update_activity(client_id, device_id)
 
             logger.debug(
-                f"Frame received for {state_key}: {event.frame_path} (pending: {state.frame_count})"
+                f"Frame received for {state_key}: {frame_path} (pending: {state.frame_count})"
             )
 
             # Check if we should generate a segment
@@ -235,6 +258,7 @@ class StreamProcessorConsumer:
         logger.info(f"Subscription: {self.config.subscription}")
         logger.info(f"Max Workers: {self.processing_config.max_workers}")
         logger.info(f"Redis session tracking: {'enabled' if self.session_store else 'disabled'}")
+        logger.info(f"Watermark: {'enabled' if self.watermark_service else 'disabled'}")
         logger.info("=" * 80)
 
         try:
