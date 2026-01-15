@@ -24,11 +24,11 @@ class WatermarkService:
         try:
             # Try to use a monospace font for better readability
             return ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", size)
-        except (OSError, IOError):
+        except OSError:
             try:
                 # Fallback to DejaVu Sans Mono (common on Linux)
                 return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", size)
-            except (OSError, IOError):
+            except OSError:
                 # Use default font as last resort
                 return ImageFont.load_default()
 
