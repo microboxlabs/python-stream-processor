@@ -63,15 +63,53 @@ class WatermarkService:
         return position_map.get(self.config.position, position_map["top_right"])
 
     def _format_timestamp(self, timestamp: datetime) -> str:
-        """Format timestamp according to configuration."""
+        """Format timestamp according to configuration with timezone support."""
         import re
+        from zoneinfo import ZoneInfo
 
+        # Convert to configured timezone if specified
+        if self.config.timezone:
+            try:
+                tz = ZoneInfo(self.config.timezone)
+                timestamp = timestamp.astimezone(tz)
+            except Exception as e:
+                # Fall back to UTC if timezone is invalid
+                from ..utils.logger import get_logger
+
+                logger = get_logger(__name__)
+                logger.warning(f"Invalid timezone '{self.config.timezone}': {e}. Using UTC.")
+                timestamp = timestamp.astimezone(ZoneInfo("UTC"))
+        else:
+            # Default to UTC if no timezone configured
+            from zoneinfo import ZoneInfo
+
+            timestamp = timestamp.astimezone(ZoneInfo("UTC"))
+
+        # Format the timestamp
         formatted = timestamp.strftime(self.config.format)
+
         # Truncate microseconds to milliseconds for display
         if "%f" in self.config.format:
             # Replace the 6-digit microsecond with 3-digit millisecond
             # Matches 6 consecutive digits (microseconds) and replaces with first 3 digits
             formatted = re.sub(r"(\d{3})\d{3}", r"\1", formatted, count=1)
+
+        # Add timezone information if enabled
+        if self.config.show_timezone:
+            # Get UTC offset (e.g., -03:00)
+            offset = timestamp.strftime("%z")
+            # Format offset as ±HH:MM
+            if offset:
+                offset_formatted = f"{offset[:3]}:{offset[3:]}"
+            else:
+                offset_formatted = "+00:00"
+
+            # Get timezone name
+            tz_name = self.config.timezone or "UTC"
+
+            # Append timezone info: "YYYY-MM-DD HH:MM:SS.sss -03:00 [America/Santiago]"
+            formatted = f"{formatted} {offset_formatted} [{tz_name}]"
+
         return formatted
 
     async def add_timestamp_watermark(
