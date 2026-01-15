@@ -5,6 +5,7 @@ Processes frames and triggers HLS segment generation.
 
 import asyncio
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 import pulsar
@@ -15,7 +16,7 @@ from ..service.hls_generator import HLSGenerator
 from ..service.redis_session_store import RedisSessionStore
 from ..service.storage_backend import sanitize_path_component
 from ..service.watermark_service import WatermarkService
-from ..utils.logger import get_logger
+from ..utils.logger import get_log_level, get_logger
 from ..utils.metrics import (
     active_devices_gauge,
     frames_received_total,
@@ -265,8 +266,21 @@ class StreamProcessorConsumer:
             if self.session_store:
                 await self.session_store.connect()
 
-            # Create Pulsar client
-            self.client = pulsar.Client(self.config.service_url)
+            # Map Python logging level to Pulsar LoggerLevel
+            log_level = get_log_level()
+            pulsar_log_level = pulsar.LoggerLevel.Error  # Default to Error
+            if log_level <= logging.DEBUG:
+                pulsar_log_level = pulsar.LoggerLevel.Debug
+            elif log_level <= logging.INFO:
+                pulsar_log_level = pulsar.LoggerLevel.Info
+            elif log_level <= logging.WARNING:
+                pulsar_log_level = pulsar.LoggerLevel.Warn
+
+            # Create Pulsar client with configured log level
+            self.client = pulsar.Client(
+                self.config.service_url,
+                logger=pulsar.ConsoleLogger(pulsar_log_level),
+            )
             assert self.client is not None  # For type checker
 
             # Create consumer with Key_Shared subscription
