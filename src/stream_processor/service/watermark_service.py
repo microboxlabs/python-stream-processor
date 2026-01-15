@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from stream_processor.config.settings import WatermarkConfig, settings
-from stream_processor.service.storage_backend import get_storage_backend
+from stream_processor.service.storage_backend import create_storage_backend
 
 
 class WatermarkService:
@@ -20,7 +20,12 @@ class WatermarkService:
         """Initialize watermark service with configuration."""
         self.config = config
         self._font = None
-        self.storage = get_storage_backend(settings.storage)
+        self.storage = create_storage_backend(
+            storage_type=settings.storage.type,
+            base_path=settings.storage.base_path,
+            gcs_bucket=settings.storage.gcs_bucket,
+            gcs_project_id=settings.storage.gcs_project_id,
+        )
 
     def _get_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """Get font for watermark text."""
