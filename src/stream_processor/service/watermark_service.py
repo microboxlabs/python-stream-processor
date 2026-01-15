@@ -56,10 +56,14 @@ class WatermarkService:
 
     def _format_timestamp(self, timestamp: datetime) -> str:
         """Format timestamp according to configuration."""
+        import re
+
         formatted = timestamp.strftime(self.config.format)
         # Truncate microseconds to milliseconds for display
-        if ".%f" in self.config.format:
-            formatted = formatted[:-3]  # Remove last 3 digits of microseconds
+        if "%f" in self.config.format:
+            # Replace the 6-digit microsecond with 3-digit millisecond
+            # Matches 6 consecutive digits (microseconds) and replaces with first 3 digits
+            formatted = re.sub(r"(\d{3})\d{3}", r"\1", formatted, count=1)
         return formatted
 
     async def add_timestamp_watermark(
