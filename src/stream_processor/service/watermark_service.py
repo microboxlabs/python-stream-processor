@@ -95,40 +95,39 @@ class WatermarkService:
         else:
             output_path = Path(output_path)
 
-        # Open image
-        image = Image.open(frame_path)
+        # Open image with context manager to ensure proper cleanup
+        with Image.open(frame_path) as image:
+            # Create drawing context
+            draw = ImageDraw.Draw(image, mode="RGBA")
 
-        # Create drawing context
-        draw = ImageDraw.Draw(image, mode="RGBA")
+            # Get font
+            font = self._get_font(self.config.font_size)
 
-        # Get font
-        font = self._get_font(self.config.font_size)
+            # Format timestamp text
+            text = self._format_timestamp(timestamp)
 
-        # Format timestamp text
-        text = self._format_timestamp(timestamp)
+            # Get text bounding box
+            text_bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
 
-        # Get text bounding box
-        text_bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = text_bbox[2] - text_bbox[0]
-        text_height = text_bbox[3] - text_bbox[1]
+            # Calculate position
+            x, y = self._get_position(image.width, image.height, text_bbox)
 
-        # Calculate position
-        x, y = self._get_position(image.width, image.height, text_bbox)
+            # Draw semi-transparent background
+            bg_padding = 5
+            bg_rect = [
+                x - bg_padding,
+                y - bg_padding,
+                x + text_width + bg_padding,
+                y + text_height + bg_padding,
+            ]
+            draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
 
-        # Draw semi-transparent background
-        bg_padding = 5
-        bg_rect = [
-            x - bg_padding,
-            y - bg_padding,
-            x + text_width + bg_padding,
-            y + text_height + bg_padding,
-        ]
-        draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
+            # Draw white text
+            draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
 
-        # Draw white text
-        draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
-
-        # Save image
-        image.save(output_path, quality=95)
+            # Save image
+            image.save(output_path, quality=95)
 
         return str(output_path)
