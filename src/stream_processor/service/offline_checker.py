@@ -35,6 +35,7 @@ class OfflineChecker:
         session_store: RedisSessionStore | None = None,
         archive_service: ArchiveService | None = None,
         check_interval: int = 10,
+        cleanup_interval_checks: int = 60,
     ):
         """
         Initialize the offline checker.
@@ -43,11 +44,14 @@ class OfflineChecker:
             session_store: Redis session store. If not provided, creates one.
             archive_service: Archive service. If not provided, creates one.
             check_interval: Seconds between checks (for continuous mode)
+            cleanup_interval_checks: Number of checks between archive cleanup runs
+                                     (default 60 = ~10 minutes at 10s check interval)
         """
         self.config = settings.archive
         self.session_store = session_store or RedisSessionStore()
         self.archive_service = archive_service or ArchiveService()
         self.check_interval = check_interval
+        self.cleanup_interval_checks = cleanup_interval_checks
         self.running = False
 
     async def check_once(self) -> int:
@@ -149,10 +153,13 @@ class OfflineChecker:
         Run the offline checker continuously.
 
         Checks for offline devices every check_interval seconds.
+        Runs archive cleanup periodically (every cleanup_interval_checks checks).
         """
         if not self.config.enabled:
             logger.info("Archive/deferred transmissions disabled")
             return
+
+        cleanup_interval_seconds = self.check_interval * self.cleanup_interval_checks
 
         logger.info("=" * 80)
         logger.info("Offline Checker Service Started (Continuous Mode)")
@@ -160,9 +167,13 @@ class OfflineChecker:
         logger.info(f"Min session duration: {self.config.min_session_duration_seconds}s")
         logger.info(f"Retention: {self.config.retention_days} days")
         logger.info(f"Check interval: {self.check_interval}s")
+        logger.info(
+            f"Archive cleanup interval: ~{cleanup_interval_seconds}s ({self.cleanup_interval_checks} checks)"
+        )
         logger.info("=" * 80)
 
         self.running = True
+        cleanup_counter = 0
 
         try:
             while self.running:
@@ -171,16 +182,38 @@ class OfflineChecker:
                 except Exception as e:
                     logger.error(f"Error during offline check: {e}", exc_info=True)
 
+                # Periodically cleanup expired archives
+                cleanup_counter += 1
+                if cleanup_counter >= self.cleanup_interval_checks:
+                    cleanup_counter = 0
+                    await self._run_archive_cleanup()
+
                 await asyncio.sleep(self.check_interval)
 
         finally:
             await self.close()
+
+    async def _run_archive_cleanup(self) -> None:
+        """
+        Run cleanup of expired archives.
+
+        Deletes archive files from storage and marks database records as 'deleted'.
+        """
+        try:
+            deleted = await self.archive_service.cleanup_expired_archives()
+            if deleted > 0:
+                logger.info(f"Archive cleanup: deleted {deleted} expired archive(s)")
+            else:
+                logger.debug("Archive cleanup: no expired archives to delete")
+        except Exception as e:
+            logger.error(f"Error during archive cleanup: {e}", exc_info=True)
 
     async def run_once(self) -> int:
         """
         Run the offline checker once and exit.
 
         Useful for Kubernetes CronJob deployments.
+        Also runs archive cleanup to delete expired archives.
 
         Returns:
             Number of offline sessions processed
@@ -193,11 +226,16 @@ class OfflineChecker:
         logger.info("Offline Checker Service (One-Shot Mode)")
         logger.info(f"Offline threshold: {self.config.offline_threshold_seconds}s")
         logger.info(f"Min session duration: {self.config.min_session_duration_seconds}s")
+        logger.info(f"Retention: {self.config.retention_days} days")
         logger.info("=" * 80)
 
         try:
             count = await self.check_once()
             logger.info(f"Offline check complete: {count} session(s) processed")
+
+            # Also run archive cleanup in one-shot mode
+            await self._run_archive_cleanup()
+
             return count
         finally:
             await self.close()
