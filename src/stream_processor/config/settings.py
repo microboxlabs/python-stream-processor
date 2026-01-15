@@ -106,12 +106,11 @@ class WatermarkConfig(BaseSettings):
     enabled: bool = Field(default=False, description="Enable timestamp watermarking")
     position: str = Field(
         default="top_right",
-        description="Watermark position: top_right, top_left, bottom_right, bottom_left"
+        description="Watermark position: top_right, top_left, bottom_right, bottom_left",
     )
     font_size: int = Field(default=24, description="Font size in pixels")
     format: str = Field(
-        default="%Y-%m-%d %H:%M:%S.%f",
-        description="Python strftime format string for timestamp"
+        default="%Y-%m-%d %H:%M:%S.%f", description="Python strftime format string for timestamp"
     )
 
 

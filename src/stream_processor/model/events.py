@@ -24,7 +24,9 @@ class FrameEvent(BaseModel):
     device_id: str = Field(alias="deviceId", description="Device identifier")
     timestamp: datetime = Field(description="Frame capture timestamp")
     request_timestamp: datetime | None = Field(
-        default=None, alias="requestTimestamp", description="HTTP request timestamp (Unix epoch seconds)"
+        default=None,
+        alias="requestTimestamp",
+        description="HTTP request timestamp (Unix epoch seconds)",
     )
     frame_path: str = Field(alias="framePath", description="Path to frame image on shared storage")
     request_id: str = Field(alias="requestId", description="Request identifier for tracking")

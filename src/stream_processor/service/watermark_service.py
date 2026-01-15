@@ -27,12 +27,16 @@ class WatermarkService:
         except OSError:
             try:
                 # Fallback to DejaVu Sans Mono (common on Linux)
-                return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", size)
+                return ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", size
+                )
             except OSError:
                 # Use default font as last resort
                 return ImageFont.load_default()
 
-    def _get_position(self, image_width: int, image_height: int, text_bbox: tuple) -> tuple[int, int]:
+    def _get_position(
+        self, image_width: int, image_height: int, text_bbox: tuple
+    ) -> tuple[int, int]:
         """Calculate watermark position based on configuration."""
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
@@ -41,7 +45,10 @@ class WatermarkService:
         position_map = {
             "top_right": (image_width - text_width - padding, padding),
             "top_left": (padding, padding),
-            "bottom_right": (image_width - text_width - padding, image_height - text_height - padding),
+            "bottom_right": (
+                image_width - text_width - padding,
+                image_height - text_height - padding,
+            ),
             "bottom_left": (padding, image_height - text_height - padding),
         }
 
@@ -73,9 +80,7 @@ class WatermarkService:
             Path to watermarked frame
         """
         # Run image processing in thread pool to avoid blocking
-        return await asyncio.to_thread(
-            self._add_watermark_sync, frame_path, timestamp, output_path
-        )
+        return await asyncio.to_thread(self._add_watermark_sync, frame_path, timestamp, output_path)
 
     def _add_watermark_sync(
         self,
