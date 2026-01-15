@@ -147,7 +147,13 @@ class WatermarkService:
         return str(output_path)
 
     def _add_watermark_gcs(self, gcs_path: str, timestamp: datetime) -> str:
-        """Apply watermark to a GCS-stored frame."""
+        """
+        Apply watermark to a GCS-stored frame.
+
+        Returns local path to watermarked file instead of uploading back to GCS.
+        This optimizes the flow by avoiding a second download when FFmpeg processes the frame.
+        The HLSGenerator will handle cleanup of the temporary file after segment generation.
+        """
         import re
 
         # Parse GCS path: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
@@ -161,71 +167,62 @@ class WatermarkService:
         device_id = match.group(2)
         subpath = match.group(3)
 
-        # Download the file from GCS
+        # Download the file from GCS (only once!)
         file_data = self.storage.read_file(client_id, device_id, subpath)
         if file_data is None:
             raise FileNotFoundError(f"Frame not found in storage: {gcs_path}")
 
-        # Create a temporary file for processing
+        # Create a temporary file for the watermarked output
+        # Don't delete it automatically - let HLSGenerator clean it up after FFmpeg processing
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
+            tmp_out_path = Path(tmp_out.name)
+
+        # Create temp input file for Pillow processing
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_in:
             tmp_in.write(file_data)
             tmp_in_path = Path(tmp_in.name)
 
         try:
-            # Create another temp file for output
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
-                tmp_out_path = Path(tmp_out.name)
+            # Apply watermark to the temporary file
+            with Image.open(tmp_in_path) as image:
+                # Create drawing context
+                draw = ImageDraw.Draw(image, mode="RGBA")
 
-            try:
-                # Apply watermark to the temporary file
-                with Image.open(tmp_in_path) as image:
-                    # Create drawing context
-                    draw = ImageDraw.Draw(image, mode="RGBA")
+                # Get font
+                font = self._get_font(self.config.font_size)
 
-                    # Get font
-                    font = self._get_font(self.config.font_size)
+                # Format timestamp text
+                text = self._format_timestamp(timestamp)
 
-                    # Format timestamp text
-                    text = self._format_timestamp(timestamp)
+                # Get text bounding box
+                text_bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
 
-                    # Get text bounding box
-                    text_bbox = draw.textbbox((0, 0), text, font=font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
+                # Calculate position
+                x, y = self._get_position(image.width, image.height, text_bbox)
 
-                    # Calculate position
-                    x, y = self._get_position(image.width, image.height, text_bbox)
+                # Draw semi-transparent background
+                bg_padding = 5
+                bg_rect = [
+                    x - bg_padding,
+                    y - bg_padding,
+                    x + text_width + bg_padding,
+                    y + text_height + bg_padding,
+                ]
+                draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
 
-                    # Draw semi-transparent background
-                    bg_padding = 5
-                    bg_rect = [
-                        x - bg_padding,
-                        y - bg_padding,
-                        x + text_width + bg_padding,
-                        y + text_height + bg_padding,
-                    ]
-                    draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
+                # Draw white text
+                draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
 
-                    # Draw white text
-                    draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
+                # Save to temp output file (this will be used by FFmpeg)
+                image.save(tmp_out_path, quality=95)
 
-                    # Save to temp output file
-                    image.save(tmp_out_path, quality=95)
-
-                # Upload the watermarked image back to GCS
-                watermarked_data = tmp_out_path.read_bytes()
-                self.storage.write_file(
-                    client_id, device_id, subpath, watermarked_data, content_type="image/jpeg"
-                )
-
-                return gcs_path
-
-            finally:
-                # Clean up output temp file
-                if tmp_out_path.exists():
-                    tmp_out_path.unlink()
+            # Return the local temp path instead of uploading back to GCS
+            # FFmpeg will read this file, then HLSGenerator will clean it up
+            return str(tmp_out_path)
 
         finally:
-            # Clean up input temp file
+            # Clean up input temp file (we only need the output)
             if tmp_in_path.exists():
                 tmp_in_path.unlink()
