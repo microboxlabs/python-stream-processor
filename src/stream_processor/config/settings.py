@@ -98,6 +98,22 @@ class ArchiveConfig(BaseSettings):
     )
 
 
+class WatermarkConfig(BaseSettings):
+    """Watermark configuration for timestamp overlays."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="WATERMARK_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Enable timestamp watermarking")
+    position: str = Field(
+        default="top_right",
+        description="Watermark position: top_right, top_left, bottom_right, bottom_left",
+    )
+    font_size: int = Field(default=24, description="Font size in pixels")
+    format: str = Field(
+        default="%Y-%m-%d %H:%M:%S.%f", description="Python strftime format string for timestamp"
+    )
+
+
 class Settings(BaseSettings):
     """Application settings container."""
 
@@ -113,6 +129,7 @@ class Settings(BaseSettings):
     redis: RedisConfig = Field(default_factory=RedisConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
+    watermark: WatermarkConfig = Field(default_factory=WatermarkConfig)
 
     # Convenience properties
     @property
