@@ -4,6 +4,8 @@ Stream Processor CLI
 Main entry points for the stream processor services:
 - consumer: Process frames from Pulsar and generate HLS segments
 - offline-checker: Detect offline devices and create archives
+- cleanup: Clean up old HLS segments and frames (for CronJob use)
+- archive-cleanup: Clean up expired archives (for CronJob use)
 """
 
 import argparse
@@ -26,11 +28,15 @@ def main() -> None:
 Commands:
   consumer         Run the Pulsar consumer for frame processing
   offline-checker  Run the offline detection service
+  cleanup          Clean up old HLS segments and frames
+  archive-cleanup  Clean up expired archives
 
 Examples:
   stream-processor consumer
   stream-processor offline-checker --continuous
   stream-processor offline-checker --once
+  stream-processor cleanup
+  stream-processor archive-cleanup
         """,
     )
 
@@ -70,6 +76,18 @@ Examples:
         help="Check interval in seconds (default: 10)",
     )
 
+    # Cleanup command (for CronJob use)
+    subparsers.add_parser(
+        "cleanup",
+        help="Clean up old HLS segments and frames (runs once, for CronJob use)",
+    )
+
+    # Archive cleanup command (for CronJob use)
+    subparsers.add_parser(
+        "archive-cleanup",
+        help="Clean up expired archives (runs once, for CronJob use)",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -83,6 +101,10 @@ Examples:
         continuous = not getattr(args, "once", False)
         interval = getattr(args, "interval", 10)
         run_offline_checker(continuous=continuous, interval=interval)
+    elif args.command == "cleanup":
+        run_cleanup()
+    elif args.command == "archive-cleanup":
+        run_archive_cleanup()
     else:
         parser.print_help()
         sys.exit(1)
@@ -150,6 +172,65 @@ def run_offline_checker(continuous: bool = True, interval: int = 10) -> None:
         logger.info("Keyboard interrupt received")
     finally:
         loop.run_until_complete(checker.close())
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+def run_cleanup() -> None:
+    """Run cleanup of old HLS segments and frames (one-shot, for CronJob use)."""
+    from .service.cleanup_service import CleanupService
+
+    logger.info("=" * 80)
+    logger.info("Stream Processor - Cleanup (One-Shot Mode)")
+    logger.info("=" * 80)
+
+    cleanup = CleanupService()
+
+    # Run cleanup once
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        loop.run_until_complete(cleanup._run_cleanup())
+        logger.info("Cleanup complete")
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+def run_archive_cleanup() -> None:
+    """Run cleanup of expired archives (one-shot, for CronJob use)."""
+    from .service.archive_service import ArchiveService
+
+    logger.info("=" * 80)
+    logger.info("Stream Processor - Archive Cleanup (One-Shot Mode)")
+    logger.info(f"Retention: {settings.archive.retention_days} days")
+    logger.info("=" * 80)
+
+    archive_service = ArchiveService()
+
+    # Run archive cleanup once
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        deleted = loop.run_until_complete(archive_service.cleanup_expired_archives())
+        if deleted > 0:
+            logger.info(f"Archive cleanup complete: {deleted} expired archive(s) deleted")
+        else:
+            logger.info("Archive cleanup complete: no expired archives to delete")
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Archive cleanup error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        loop.run_until_complete(archive_service.close())
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
