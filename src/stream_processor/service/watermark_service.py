@@ -63,15 +63,61 @@ class WatermarkService:
         return position_map.get(self.config.position, position_map["top_right"])
 
     def _format_timestamp(self, timestamp: datetime) -> str:
-        """Format timestamp according to configuration."""
-        import re
+        """Format timestamp according to configuration with timezone support."""
+        from zoneinfo import ZoneInfo
 
+        # Track the effective timezone name for display
+        effective_tz_name = None
+
+        # Convert to configured timezone if specified
+        if self.config.timezone:
+            try:
+                tz = ZoneInfo(self.config.timezone)
+                timestamp = timestamp.astimezone(tz)
+                effective_tz_name = self.config.timezone
+            except Exception as e:
+                # Fall back to UTC if timezone is invalid
+                from ..utils.logger import get_logger
+
+                logger = get_logger(__name__)
+                logger.warning(f"Invalid timezone '{self.config.timezone}': {e}. Using UTC.")
+                timestamp = timestamp.astimezone(ZoneInfo("UTC"))
+                effective_tz_name = "UTC"
+        else:
+            # Default to UTC if no timezone configured
+            from zoneinfo import ZoneInfo
+
+            timestamp = timestamp.astimezone(ZoneInfo("UTC"))
+            effective_tz_name = "UTC"
+
+        # Format the timestamp
         formatted = timestamp.strftime(self.config.format)
+
         # Truncate microseconds to milliseconds for display
         if "%f" in self.config.format:
-            # Replace the 6-digit microsecond with 3-digit millisecond
-            # Matches 6 consecutive digits (microseconds) and replaces with first 3 digits
-            formatted = re.sub(r"(\d{3})\d{3}", r"\1", formatted, count=1)
+            # Get the actual microsecond value from the timestamp
+            microsecond = timestamp.microsecond
+            millisecond = microsecond // 1000
+            # Replace the 6-digit microsecond string with 3-digit millisecond
+            # This avoids accidentally matching other digit sequences like YYYYMMDD
+            formatted = formatted.replace(f"{microsecond:06d}", f"{millisecond:03d}", 1)
+
+        # Add timezone information if enabled
+        if self.config.show_timezone:
+            # Get UTC offset (e.g., -03:00)
+            offset = timestamp.strftime("%z")
+            # Format offset as ±HH:MM
+            if offset:
+                offset_formatted = f"{offset[:3]}:{offset[3:]}"
+            else:
+                offset_formatted = "+00:00"
+
+            # Use the effective timezone name (matches the actual timezone used)
+            tz_name = effective_tz_name or "UTC"
+
+            # Append timezone info: "YYYY-MM-DD HH:MM:SS.sss -03:00 [America/Santiago]"
+            formatted = f"{formatted} {offset_formatted} [{tz_name}]"
+
         return formatted
 
     async def add_timestamp_watermark(

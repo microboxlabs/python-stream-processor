@@ -112,6 +112,13 @@ class WatermarkConfig(BaseSettings):
     format: str = Field(
         default="%Y-%m-%d %H:%M:%S.%f", description="Python strftime format string for timestamp"
     )
+    timezone: str | None = Field(
+        default=None,
+        description="IANA timezone name (e.g., America/Santiago, UTC). If None, uses UTC.",
+    )
+    show_timezone: bool = Field(
+        default=True, description="Show timezone offset and name in watermark"
+    )
 
 
 class Settings(BaseSettings):
