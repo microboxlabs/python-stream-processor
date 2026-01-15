@@ -210,9 +210,13 @@ Deploy multiple instances (K8s replicas) and Pulsar will distribute devices acro
 
 ## HLS Output
 
-Generated HLS streams are compatible with:
+Generated HLS streams are compatible with all major browsers:
 - **Safari**: Native support
-- **Chrome/Firefox/Edge**: Via hls.js library
+- **Chrome 142+**: Native support (January 2025)
+- **Edge 142+**: Native support (Chromium-based)
+- **Firefox**: Via hls.js library (native support planned)
+
+> **Note**: Chrome 142 and newer now play `.m3u8` streams natively without requiring hls.js. For older browsers, use [hls.js](https://github.com/video-dev/hls.js/) as a fallback.
 
 Example playlist (`playlist.m3u8`):
 ```m3u8
