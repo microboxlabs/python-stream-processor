@@ -114,22 +114,87 @@ REDIS_ENABLED=false
 METRICS_PORT=9090
 ```
 
+## CLI Commands
+
+The stream processor provides several commands for different deployment scenarios:
+
+### Consumer (Main Service)
+
+Processes frames from Pulsar and generates HLS segments:
+
+```bash
+# Run the Pulsar consumer (default command)
+uv run python -m stream_processor.main consumer
+
+# Disable Redis session tracking (use in-memory only)
+uv run python -m stream_processor.main consumer --no-redis
+```
+
+### Offline Checker
+
+Detects offline devices and creates deferred transmission archives:
+
+```bash
+# Run continuously (default) - checks every 10 seconds
+uv run python -m stream_processor.main offline-checker --continuous
+
+# Run once and exit (for Kubernetes CronJob)
+uv run python -m stream_processor.main offline-checker --once
+
+# Custom check interval (in seconds)
+uv run python -m stream_processor.main offline-checker --interval 30
+```
+
+### Segment Cleanup
+
+Cleans up old HLS segments and frames beyond the retention window (24h default):
+
+```bash
+# Run once (for Kubernetes CronJob)
+uv run python -m stream_processor.main cleanup
+```
+
+### Archive Cleanup
+
+Cleans up expired deferred transmission archives (7 days default):
+
+```bash
+# Run once (for Kubernetes CronJob)
+uv run python -m stream_processor.main archive-cleanup
+```
+
+### Help
+
+```bash
+# Show all available commands
+uv run python -m stream_processor.main --help
+```
+
 ## Quick Start
 
 1. **Configure environment variables**:
    ```bash
-   cp .env.example .env
+   cp env.example .env
    # Edit .env with your Pulsar and storage settings
    ```
 
-2. **Run the processor**:
+2. **Run the consumer** (main service):
    ```bash
-   # Using uv (recommended)
-   uv run main.py
-
-   # Or using Python directly
-   python main.py
+   uv run python -m stream_processor.main consumer
    ```
+
+3. **Run the offline checker** (separate process):
+   ```bash
+   uv run python -m stream_processor.main offline-checker
+   ```
+
+### Legacy Entry Point
+
+For backwards compatibility, `main.py` in the project root runs both consumer and cleanup service together:
+
+```bash
+uv run main.py
+```
 
 ## Scaling
 
@@ -145,9 +210,13 @@ Deploy multiple instances (K8s replicas) and Pulsar will distribute devices acro
 
 ## HLS Output
 
-Generated HLS streams are compatible with:
+Generated HLS streams are compatible with all major browsers:
 - **Safari**: Native support
-- **Chrome/Firefox/Edge**: Via hls.js library
+- **Chrome 142+**: Native support (January 2025)
+- **Edge 142+**: Native support (Chromium-based)
+- **Firefox**: Via hls.js library (native support planned)
+
+> **Note**: Chrome 142 and newer now play `.m3u8` streams natively without requiring hls.js. For older browsers, use [hls.js](https://github.com/video-dev/hls.js/) as a fallback.
 
 Example playlist (`playlist.m3u8`):
 ```m3u8
@@ -207,12 +276,73 @@ uv run mypy src/
 # Build image
 docker build -t stream-processor:latest .
 
-# Run container
+# Run consumer
 docker run -d \
   --name stream-processor \
   -e PULSAR_SERVICE_URL=pulsar://pulsar:6650 \
   -v /mnt/streamhub:/mnt/streamhub \
-  stream-processor:latest
+  stream-processor:latest \
+  uv run python -m stream_processor.main consumer
+
+# Run offline checker
+docker run -d \
+  --name offline-checker \
+  -e REDIS_URL=redis://redis:6379 \
+  -e REDIS_ENABLED=true \
+  -v /mnt/streamhub:/mnt/streamhub \
+  stream-processor:latest \
+  uv run python -m stream_processor.main offline-checker --continuous
+```
+
+## Kubernetes Deployment
+
+Recommended deployment architecture with single-responsibility components:
+
+| Component | Type | Command |
+|-----------|------|---------|
+| Consumer | Deployment | `consumer` |
+| Offline Checker | Deployment | `offline-checker --continuous` |
+| Segment Cleanup | CronJob (*/5 * * * *) | `cleanup` |
+| Archive Cleanup | CronJob (0 * * * *) | `archive-cleanup` |
+
+Example CronJob for segment cleanup:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stream-processor-cleanup
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: stream-processor:latest
+            command: ["uv", "run", "python", "-m", "stream_processor.main", "cleanup"]
+          restartPolicy: OnFailure
+```
+
+Example CronJob for archive cleanup:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: stream-processor-archive-cleanup
+spec:
+  schedule: "0 * * * *"  # Every hour
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: archive-cleanup
+            image: stream-processor:latest
+            command: ["uv", "run", "python", "-m", "stream_processor.main", "archive-cleanup"]
+          restartPolicy: OnFailure
 ```
 
 ## Metrics
