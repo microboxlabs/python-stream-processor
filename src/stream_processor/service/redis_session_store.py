@@ -266,3 +266,46 @@ class RedisSessionStore:
         deleted: int = await client.delete(key)
 
         return deleted > 0
+
+    async def restart_session(
+        self,
+        client_id: str,
+        device_id: str,
+    ) -> SessionData:
+        """
+        Restart a session with a new session_id for max duration breaking.
+
+        The device is still active, so we create a new session that will
+        continue tracking from whatever segment the consumer generates next.
+
+        Args:
+            client_id: Client identifier
+            device_id: Device identifier
+
+        Returns:
+            The new SessionData
+        """
+        client = await self.connect()
+        key = self._session_key(client_id, device_id)
+        now = datetime.now(UTC).isoformat()
+
+        # Create new session with fresh session_id
+        session = SessionData(
+            client_id=client_id,
+            device_id=device_id,
+            session_id=str(uuid.uuid4()),
+            started_at=now,
+            last_frame_at=now,
+            first_segment_number=-1,  # Will be set on first segment of new session
+            last_segment_number=-1,
+            frame_count=0,
+        )
+
+        logger.info(
+            f"Session restarted (max duration): {session.state_key} "
+            f"new_session={session.session_id}"
+        )
+
+        # Save new session (index entry already exists)
+        await client.set(key, session.to_json(), ex=86400)
+        return session
