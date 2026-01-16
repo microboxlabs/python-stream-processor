@@ -202,7 +202,9 @@ class OfflineChecker:
         # Skip archiving if no segments generated
         if session.first_segment_number < 0 or session.last_segment_number < 0:
             logger.info(f"Session has no segments to archive (max duration): {state_key}")
-            await self.session_store.restart_session(session.client_id, session.device_id)
+            await self.session_store.restart_session(
+                session.client_id, session.device_id, expected_session_id=session.session_id
+            )
             return
 
         # Skip archiving if session too short
@@ -211,7 +213,9 @@ class OfflineChecker:
                 f"Session too short to archive (max duration): {state_key} "
                 f"({session.duration_seconds}s < {self.config.min_session_duration_seconds}s)"
             )
-            await self.session_store.restart_session(session.client_id, session.device_id)
+            await self.session_store.restart_session(
+                session.client_id, session.device_id, expected_session_id=session.session_id
+            )
             return
 
         logger.info(
@@ -244,7 +248,10 @@ class OfflineChecker:
             )
 
         # Restart session even if archive fails - device is still active
-        await self.session_store.restart_session(session.client_id, session.device_id)
+        # Pass expected_session_id to prevent overwriting if another process already restarted
+        await self.session_store.restart_session(
+            session.client_id, session.device_id, expected_session_id=session.session_id
+        )
 
     async def run_continuous(self) -> None:
         """
