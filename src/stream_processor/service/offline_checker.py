@@ -177,9 +177,7 @@ class OfflineChecker:
 
         # Re-read the latest session data to capture any segments that arrived
         # between the check_once snapshot and now
-        latest_session = await self.session_store.get_session(
-            session.client_id, session.device_id
-        )
+        latest_session = await self.session_store.get_session(session.client_id, session.device_id)
 
         if latest_session is None:
             logger.warning(

@@ -192,8 +192,7 @@ class RedisSessionStore:
                     if is_new_session:
                         pipe.sadd(SESSION_INDEX_KEY, state_key)
                         logger.info(
-                            f"New session started: {session.state_key} "
-                            f"session={session.session_id}"
+                            f"New session started: {session.state_key} session={session.session_id}"
                         )
                     pipe.set(key, session.to_json(), ex=86400)
                     await pipe.execute()
@@ -209,9 +208,7 @@ class RedisSessionStore:
                 continue
 
         # All retries exhausted
-        logger.warning(
-            f"Failed to update activity after {MAX_CAS_RETRIES} retries: {state_key}"
-        )
+        logger.warning(f"Failed to update activity after {MAX_CAS_RETRIES} retries: {state_key}")
         return None
 
     async def update_segment(
@@ -257,10 +254,7 @@ class RedisSessionStore:
                 session = SessionData.from_json(existing)
 
                 # Validate session_id if provided (reject stale updates)
-                if (
-                    expected_session_id is not None
-                    and session.session_id != expected_session_id
-                ):
+                if expected_session_id is not None and session.session_id != expected_session_id:
                     await client.unwatch()
                     logger.debug(
                         f"Ignoring stale segment update: {session.state_key} "
@@ -296,9 +290,7 @@ class RedisSessionStore:
                 continue
 
         # All retries exhausted
-        logger.warning(
-            f"Failed to update segment after {MAX_CAS_RETRIES} retries: {state_key}"
-        )
+        logger.warning(f"Failed to update segment after {MAX_CAS_RETRIES} retries: {state_key}")
         return None
 
     async def get_session(self, client_id: str, device_id: str) -> SessionData | None:
@@ -437,7 +429,5 @@ class RedisSessionStore:
                 continue
 
         # All retries exhausted
-        logger.warning(
-            f"Failed to restart session after {MAX_CAS_RETRIES} retries: {state_key}"
-        )
+        logger.warning(f"Failed to restart session after {MAX_CAS_RETRIES} retries: {state_key}")
         return None
