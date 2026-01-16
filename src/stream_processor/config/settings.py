@@ -93,6 +93,10 @@ class ArchiveConfig(BaseSettings):
     offline_threshold_seconds: int = Field(
         default=60, description="Seconds without frames before considered offline"
     )
+    max_session_duration_seconds: int = Field(
+        default=7200,  # 2 hours
+        description="Maximum session duration before auto-breaking (0 to disable)",
+    )
     database_url: str | None = Field(
         default=None, description="PostgreSQL connection URL for archive metadata"
     )

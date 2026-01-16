@@ -56,22 +56,24 @@ class OfflineChecker:
 
     async def check_once(self) -> int:
         """
-        Check for offline devices once.
+        Check for offline devices and sessions exceeding max duration.
 
         Returns:
-            Number of offline sessions detected and processed
+            Number of sessions processed (offline + max duration exceeded)
         """
         await self.session_store.connect()
 
         now = datetime.now(UTC)
         threshold = timedelta(seconds=self.config.offline_threshold_seconds)
-        offline_count = 0
+        max_duration = self.config.max_session_duration_seconds
+        processed_count = 0
 
         sessions = await self.session_store.get_all_sessions()
 
         logger.info(
             f"[OfflineChecker] Checking {len(sessions)} active session(s), "
-            f"threshold={self.config.offline_threshold_seconds}s"
+            f"offline_threshold={self.config.offline_threshold_seconds}s, "
+            f"max_duration={max_duration}s"
         )
 
         for session in sessions:
@@ -84,6 +86,7 @@ class OfflineChecker:
                 f"segments={session.first_segment_number}-{session.last_segment_number}"
             )
 
+            # Check offline first (device stopped sending)
             if idle_time > threshold:
                 logger.info(
                     f"Device offline detected: {session.state_key} "
@@ -91,9 +94,18 @@ class OfflineChecker:
                     f"session duration={session.duration_seconds}s)"
                 )
                 await self._end_session(session)
-                offline_count += 1
+                processed_count += 1
 
-        return offline_count
+            # Check max duration (device still active but session too long)
+            elif max_duration > 0 and session.duration_seconds >= max_duration:
+                logger.info(
+                    f"Max duration exceeded: {session.state_key} "
+                    f"(duration={session.duration_seconds}s >= {max_duration}s)"
+                )
+                await self._break_session_for_duration(session)
+                processed_count += 1
+
+        return processed_count
 
     async def _end_session(self, session: SessionData) -> None:
         """
@@ -148,6 +160,97 @@ class OfflineChecker:
         except Exception as e:
             logger.error(f"Error creating archive for {state_key}: {e}", exc_info=True)
 
+    async def _break_session_for_duration(self, session: SessionData) -> None:
+        """
+        Break a session due to max duration exceeded and start a new one.
+
+        The device is still actively sending frames, so we:
+        1. Re-read the latest session data to capture any segments that arrived since snapshot
+        2. Archive the current session
+        3. Create a new session that continues seamlessly
+
+        Args:
+            session: The session data from Redis (may be stale)
+        """
+        state_key = session.state_key
+        original_session_id = session.session_id
+
+        # Re-read the latest session data to capture any segments that arrived
+        # between the check_once snapshot and now
+        latest_session = await self.session_store.get_session(session.client_id, session.device_id)
+
+        if latest_session is None:
+            logger.warning(
+                f"Session disappeared before break (max duration): {state_key} "
+                f"session={original_session_id}"
+            )
+            return
+
+        # Verify session_id hasn't changed (another process might have restarted it)
+        if latest_session.session_id != original_session_id:
+            logger.info(
+                f"Session already restarted by another process (max duration): {state_key} "
+                f"original={original_session_id}, current={latest_session.session_id}"
+            )
+            return
+
+        # Use the latest session data for archiving
+        session = latest_session
+
+        # Skip archiving if no segments generated
+        if session.first_segment_number < 0 or session.last_segment_number < 0:
+            logger.info(f"Session has no segments to archive (max duration): {state_key}")
+            await self.session_store.restart_session(
+                session.client_id, session.device_id, expected_session_id=session.session_id
+            )
+            return
+
+        # Skip archiving if session too short
+        if session.duration_seconds < self.config.min_session_duration_seconds:
+            logger.info(
+                f"Session too short to archive (max duration): {state_key} "
+                f"({session.duration_seconds}s < {self.config.min_session_duration_seconds}s)"
+            )
+            await self.session_store.restart_session(
+                session.client_id, session.device_id, expected_session_id=session.session_id
+            )
+            return
+
+        logger.info(
+            f"Breaking session for max duration: {state_key} session={session.session_id} "
+            f"duration={session.duration_seconds}s segments={session.segment_count}"
+        )
+
+        # Convert to DeviceSession for archive service
+        device_session = DeviceSession(
+            client_id=session.client_id,
+            device_id=session.device_id,
+            session_id=session.session_id,
+            started_at=session.started_at_dt,
+            last_frame_at=session.last_frame_at_dt,
+            first_segment_number=session.first_segment_number,
+            last_segment_number=session.last_segment_number,
+            frame_count=session.frame_count,
+        )
+
+        # Archive first, then restart
+        try:
+            logger.info(
+                f"Creating archive for max-duration session: {state_key} "
+                f"session={session.session_id}"
+            )
+            await self.archive_service.create_archive(device_session)
+        except Exception as e:
+            logger.error(
+                f"Error creating archive for {state_key} (max duration): {e}", exc_info=True
+            )
+
+        # Restart session even if archive fails - device is still active
+        # Pass expected_session_id to prevent overwriting if another process already restarted
+        await self.session_store.restart_session(
+            session.client_id, session.device_id, expected_session_id=session.session_id
+        )
+
     async def run_continuous(self) -> None:
         """
         Run the offline checker continuously.
@@ -165,6 +268,10 @@ class OfflineChecker:
         logger.info("Offline Checker Service Started (Continuous Mode)")
         logger.info(f"Offline threshold: {self.config.offline_threshold_seconds}s")
         logger.info(f"Min session duration: {self.config.min_session_duration_seconds}s")
+        logger.info(
+            f"Max session duration: {self.config.max_session_duration_seconds}s "
+            f"({'disabled' if self.config.max_session_duration_seconds == 0 else 'enabled'})"
+        )
         logger.info(f"Retention: {self.config.retention_days} days")
         logger.info(f"Check interval: {self.check_interval}s")
         logger.info(
@@ -226,6 +333,10 @@ class OfflineChecker:
         logger.info("Offline Checker Service (One-Shot Mode)")
         logger.info(f"Offline threshold: {self.config.offline_threshold_seconds}s")
         logger.info(f"Min session duration: {self.config.min_session_duration_seconds}s")
+        logger.info(
+            f"Max session duration: {self.config.max_session_duration_seconds}s "
+            f"({'disabled' if self.config.max_session_duration_seconds == 0 else 'enabled'})"
+        )
         logger.info(f"Retention: {self.config.retention_days} days")
         logger.info("=" * 80)
 
