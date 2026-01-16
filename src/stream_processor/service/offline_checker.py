@@ -165,13 +165,39 @@ class OfflineChecker:
         Break a session due to max duration exceeded and start a new one.
 
         The device is still actively sending frames, so we:
-        1. Archive the current session
-        2. Create a new session that continues seamlessly
+        1. Re-read the latest session data to capture any segments that arrived since snapshot
+        2. Archive the current session
+        3. Create a new session that continues seamlessly
 
         Args:
-            session: The session data from Redis
+            session: The session data from Redis (may be stale)
         """
         state_key = session.state_key
+        original_session_id = session.session_id
+
+        # Re-read the latest session data to capture any segments that arrived
+        # between the check_once snapshot and now
+        latest_session = await self.session_store.get_session(
+            session.client_id, session.device_id
+        )
+
+        if latest_session is None:
+            logger.warning(
+                f"Session disappeared before break (max duration): {state_key} "
+                f"session={original_session_id}"
+            )
+            return
+
+        # Verify session_id hasn't changed (another process might have restarted it)
+        if latest_session.session_id != original_session_id:
+            logger.info(
+                f"Session already restarted by another process (max duration): {state_key} "
+                f"original={original_session_id}, current={latest_session.session_id}"
+            )
+            return
+
+        # Use the latest session data for archiving
+        session = latest_session
 
         # Skip archiving if no segments generated
         if session.first_segment_number < 0 or session.last_segment_number < 0:

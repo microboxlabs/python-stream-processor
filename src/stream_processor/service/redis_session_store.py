@@ -119,7 +119,8 @@ class RedisSessionStore:
         self,
         client_id: str,
         device_id: str,
-    ) -> SessionData:
+        expected_session_id: str | None = None,
+    ) -> SessionData | None:
         """
         Update session activity timestamp.
 
@@ -129,9 +130,11 @@ class RedisSessionStore:
         Args:
             client_id: Client identifier
             device_id: Device identifier
+            expected_session_id: If provided, only update if session_id matches.
+                                 Returns None if session_id doesn't match (stale update).
 
         Returns:
-            The updated SessionData
+            The updated SessionData, or None if session_id mismatch (stale update)
         """
         client = await self.connect()
 
@@ -143,6 +146,15 @@ class RedisSessionStore:
 
         if existing:
             session = SessionData.from_json(existing)
+
+            # Validate session_id if provided (reject stale updates)
+            if expected_session_id is not None and session.session_id != expected_session_id:
+                logger.debug(
+                    f"Ignoring stale activity update: {session.state_key} "
+                    f"expected={expected_session_id}, current={session.session_id}"
+                )
+                return None
+
             session.last_frame_at = now
             session.frame_count += 1
         else:
@@ -171,6 +183,7 @@ class RedisSessionStore:
         client_id: str,
         device_id: str,
         segment_number: int,
+        expected_session_id: str | None = None,
     ) -> SessionData | None:
         """
         Update session with segment generation info.
@@ -181,9 +194,11 @@ class RedisSessionStore:
             client_id: Client identifier
             device_id: Device identifier
             segment_number: Current segment number
+            expected_session_id: If provided, only update if session_id matches.
+                                 Returns None if session_id doesn't match (stale update).
 
         Returns:
-            The updated SessionData, or None if session doesn't exist
+            The updated SessionData, or None if session doesn't exist or session_id mismatch
         """
         client = await self.connect()
 
@@ -195,6 +210,14 @@ class RedisSessionStore:
             return None
 
         session = SessionData.from_json(existing)
+
+        # Validate session_id if provided (reject stale updates)
+        if expected_session_id is not None and session.session_id != expected_session_id:
+            logger.debug(
+                f"Ignoring stale segment update: {session.state_key} "
+                f"expected={expected_session_id}, current={session.session_id}"
+            )
+            return None
 
         # Set first segment number if not yet set
         if session.first_segment_number < 0:
