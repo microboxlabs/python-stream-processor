@@ -348,48 +348,47 @@ class StreamProcessorConsumer:
         finally:
             await self.stop()
 
+    async def _flush_pending_frames(self) -> None:
+        """Process any remaining frames for all devices."""
+        for state_key, state in self.device_states.items():
+            if not state.pending_frames:
+                continue
+            logger.info(f"Processing remaining frames for {state_key}")
+            try:
+                await self._generate_segment(state)
+            except Exception as e:
+                logger.error(f"Error processing remaining frames: {e}")
+
+    async def _close_async_resource(self, resource, name: str) -> None:
+        """Safely close an async resource with error logging."""
+        if not resource:
+            return
+        try:
+            await resource.close()
+        except Exception as e:
+            logger.error(f"Error closing {name}: {e}")
+
+    def _close_sync_resource(self, resource, name: str) -> None:
+        """Safely close a sync resource with error logging."""
+        if not resource:
+            return
+        try:
+            resource.close()
+        except Exception as e:
+            logger.error(f"Error closing {name}: {e}")
+
     async def stop(self) -> None:
         """Stop the consumer gracefully."""
         logger.info("Stopping consumer...")
         self.running = False
 
-        # Process any remaining frames
-        for state_key, state in self.device_states.items():
-            if state.pending_frames:
-                logger.info(f"Processing remaining frames for {state_key}")
-                try:
-                    await self._generate_segment(state)
-                except Exception as e:
-                    logger.error(f"Error processing remaining frames: {e}")
+        await self._flush_pending_frames()
+        await self._close_async_resource(self.session_store, "Redis session store")
+        await self._close_async_resource(self.playlist_store, "Redis playlist store")
 
-        # Close Redis session store
-        if self.session_store:
-            try:
-                await self.session_store.close()
-            except Exception as e:
-                logger.error(f"Error closing Redis session store: {e}")
-
-        # Close Redis playlist store
-        if self.playlist_store:
-            try:
-                await self.playlist_store.close()
-            except Exception as e:
-                logger.error(f"Error closing Redis playlist store: {e}")
-
-        # Shutdown executor
         self.executor.shutdown(wait=True)
 
-        # Close Pulsar resources
-        if self.consumer:
-            try:
-                self.consumer.close()
-            except Exception as e:
-                logger.error(f"Error closing consumer: {e}")
-
-        if self.client:
-            try:
-                self.client.close()
-            except Exception as e:
-                logger.error(f"Error closing client: {e}")
+        self._close_sync_resource(self.consumer, "consumer")
+        self._close_sync_resource(self.client, "client")
 
         logger.info("Consumer stopped")
