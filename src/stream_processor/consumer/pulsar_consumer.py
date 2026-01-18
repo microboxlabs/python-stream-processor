@@ -162,6 +162,20 @@ class StreamProcessorConsumer:
             ):
                 await self._generate_segment(state)
 
+    async def _add_segment_to_playlist(
+        self, client_id: str, device_id: str, segment_number: int
+    ) -> None:
+        """Add segment to playlist store in Redis for dynamic playlist generation."""
+        if not self.playlist_store:
+            return
+        try:
+            await self.playlist_store.add_segment(client_id, device_id, segment_number)
+        except Exception as e:
+            logger.warning(
+                f"Failed to add segment to playlist store "
+                f"(client={client_id}, device={device_id}, segment={segment_number}): {e}"
+            )
+
     async def _generate_segment(self, state: DeviceState) -> None:
         """Generate HLS segment from accumulated frames."""
         client_id = state.client_id
@@ -198,9 +212,7 @@ class StreamProcessorConsumer:
                 if self.session_store:
                     await self.session_store.update_segment(client_id, device_id, segment_number)
 
-                # Add segment to playlist store in Redis (for dynamic playlist generation)
-                if self.playlist_store:
-                    await self.playlist_store.add_segment(client_id, device_id, segment_number)
+                await self._add_segment_to_playlist(client_id, device_id, segment_number)
             else:
                 logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 
