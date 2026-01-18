@@ -1,12 +1,15 @@
 """Pytest configuration and fixtures."""
 
-import sys
 import os
+import sys
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
+import fakeredis.aioredis
+
+from stream_processor.service.redis_playlist_store import RedisPlaylistStore
 
 
 @pytest.fixture
@@ -37,3 +40,32 @@ def temp_storage_path(tmp_path):
         "frames": str(frames_path),
         "hls": str(hls_path),
     }
+
+
+@pytest.fixture
+def fake_redis():
+    """Create a fake Redis client for testing."""
+    return fakeredis.aioredis.FakeRedis(decode_responses=True)
+
+
+@pytest.fixture
+async def playlist_store(fake_redis):
+    """Create a RedisPlaylistStore with a fake Redis client for testing."""
+    store = RedisPlaylistStore()
+    # Inject the fake Redis client directly
+    store._client = fake_redis
+    yield store
+    # Cleanup
+    await fake_redis.flushall()
+
+
+@pytest.fixture
+def sample_client_id():
+    """Sample client ID for testing."""
+    return "test-client-001"
+
+
+@pytest.fixture
+def sample_device_id():
+    """Sample device ID for testing."""
+    return "test-device-001"

@@ -13,6 +13,7 @@ import pulsar
 from ..config.settings import settings
 from ..model.events import DeviceState, FrameEvent
 from ..service.hls_generator import HLSGenerator
+from ..service.redis_playlist_store import RedisPlaylistStore
 from ..service.redis_session_store import RedisSessionStore
 from ..service.storage_backend import sanitize_path_component
 from ..service.watermark_service import WatermarkService
@@ -79,6 +80,14 @@ class StreamProcessorConsumer:
         if use_redis and settings.redis.enabled and self.archive_config.enabled:
             self.session_store = RedisSessionStore()
             logger.info("Redis session tracking enabled for offline detection")
+
+        # Redis playlist store for dynamic playlist generation
+        # Stores segment metadata for on-the-fly playlist generation by quarkus
+        self.playlist_store: RedisPlaylistStore | None = None
+
+        if use_redis and settings.redis.enabled and settings.redis.playlist_enabled:
+            self.playlist_store = RedisPlaylistStore()
+            logger.info("Redis playlist store enabled for dynamic playlist generation")
 
     def _get_or_create_state(self, client_id: str, device_id: str) -> DeviceState:
         """Get or create device state using client_id:device_id key."""
@@ -188,6 +197,10 @@ class StreamProcessorConsumer:
                 # Update session segment info in Redis (for offline-checker service)
                 if self.session_store:
                     await self.session_store.update_segment(client_id, device_id, segment_number)
+
+                # Add segment to playlist store in Redis (for dynamic playlist generation)
+                if self.playlist_store:
+                    await self.playlist_store.add_segment(client_id, device_id, segment_number)
             else:
                 logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 
@@ -258,6 +271,7 @@ class StreamProcessorConsumer:
         logger.info(f"Subscription: {self.config.subscription}")
         logger.info(f"Max Workers: {self.processing_config.max_workers}")
         logger.info(f"Redis session tracking: {'enabled' if self.session_store else 'disabled'}")
+        logger.info(f"Redis playlist store: {'enabled' if self.playlist_store else 'disabled'}")
         logger.info(f"Watermark: {'enabled' if self.watermark_service else 'disabled'}")
         logger.info("=" * 80)
 
@@ -265,6 +279,10 @@ class StreamProcessorConsumer:
             # Connect to Redis if session store is configured
             if self.session_store:
                 await self.session_store.connect()
+
+            # Connect to Redis if playlist store is configured
+            if self.playlist_store:
+                await self.playlist_store.connect()
 
             # Map Python logging level to Pulsar LoggerLevel
             log_level = get_log_level()
@@ -350,6 +368,13 @@ class StreamProcessorConsumer:
                 await self.session_store.close()
             except Exception as e:
                 logger.error(f"Error closing Redis session store: {e}")
+
+        # Close Redis playlist store
+        if self.playlist_store:
+            try:
+                await self.playlist_store.close()
+            except Exception as e:
+                logger.error(f"Error closing Redis playlist store: {e}")
 
         # Shutdown executor
         self.executor.shutdown(wait=True)
