@@ -9,6 +9,7 @@ Used by:
 """
 
 import time
+from urllib.parse import urlparse
 
 import redis.asyncio as redis
 
@@ -43,13 +44,22 @@ class RedisPlaylistStore:
         self.redis_url = redis_url or settings.redis.url
         self._client: redis.Redis | None = None
 
+    def _redact_url(self, url: str) -> str:
+        """Redact credentials from a URL for safe logging."""
+        parsed = urlparse(url)
+        if parsed.password:
+            # Replace password with *** in netloc
+            redacted_netloc = parsed.netloc.replace(f":{parsed.password}@", ":***@")
+            return url.replace(parsed.netloc, redacted_netloc)
+        return url
+
     async def connect(self) -> redis.Redis:
         """Connect to Redis and return the client."""
         if self._client is None:
             self._client = redis.from_url(self.redis_url, decode_responses=True)
             # Test connection
             await self._client.ping()  # type: ignore[misc]
-            logger.info(f"Playlist store connected to Redis at {self.redis_url}")
+            logger.info(f"Playlist store connected to Redis at {self._redact_url(self.redis_url)}")
         return self._client
 
     async def close(self) -> None:
