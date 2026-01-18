@@ -69,6 +69,10 @@ class RedisConfig(BaseSettings):
 
     url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
     enabled: bool = Field(default=False, description="Enable Redis for distributed state")
+    playlist_enabled: bool = Field(
+        default=False,
+        description="Enable Redis-based playlist metadata (requires enabled=True)",
+    )
 
 
 class MetricsConfig(BaseSettings):

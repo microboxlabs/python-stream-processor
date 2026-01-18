@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from ..config.settings import settings
 from ..utils.logger import get_logger
 from ..utils.metrics import cleanup_duration_histogram, segments_deleted_total
+from .redis_playlist_store import RedisPlaylistStore
 from .storage_backend import StorageBackend, create_storage_backend
 
 logger = get_logger(__name__)
@@ -50,6 +51,13 @@ class CleanupService:
         # Run cleanup every 5 minutes
         self.cleanup_interval_seconds = 300
 
+        # Redis playlist store for removing segment metadata during cleanup
+        self.playlist_store: RedisPlaylistStore | None = None
+
+        if settings.redis.enabled and settings.redis.playlist_enabled:
+            self.playlist_store = RedisPlaylistStore()
+            logger.info("Redis playlist store enabled for cleanup synchronization")
+
         logger.info(f"Cleanup Service using {self.storage.get_storage_type()} storage backend")
 
     async def run(self) -> None:
@@ -63,7 +71,12 @@ class CleanupService:
         logger.info(f"Retention: {self.retention_hours} hours")
         logger.info(f"Interval: {self.cleanup_interval_seconds} seconds")
         logger.info(f"Storage: {self.storage.get_storage_type()}")
+        logger.info(f"Redis playlist store: {'enabled' if self.playlist_store else 'disabled'}")
         logger.info("=" * 80)
+
+        # Connect to Redis if playlist store is configured
+        if self.playlist_store:
+            await self.playlist_store.connect()
 
         self.running = True
 
@@ -80,6 +93,13 @@ class CleanupService:
         """Stop the cleanup service."""
         logger.info("Stopping cleanup service...")
         self.running = False
+
+        # Close Redis playlist store
+        if self.playlist_store:
+            try:
+                await self.playlist_store.close()
+            except Exception as e:
+                logger.error(f"Error closing Redis playlist store: {e}")
 
     async def _run_cleanup(self) -> None:
         """
@@ -126,6 +146,19 @@ class CleanupService:
                     f"Cleaned up {state_key}: "
                     f"{deleted_count} segments, {bytes_freed / 1024 / 1024:.2f} MB freed"
                 )
+
+            # Remove old segment metadata from Redis playlist store
+            if self.playlist_store:
+                try:
+                    redis_removed = await self.playlist_store.remove_segments_before(
+                        client_id, device_id, cutoff_timestamp
+                    )
+                    if redis_removed > 0:
+                        logger.debug(
+                            f"Removed {redis_removed} segment entries from Redis for {state_key}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error cleaning Redis playlist store for {state_key}: {e}")
 
             total_deleted += deleted_count
             total_bytes_freed += bytes_freed

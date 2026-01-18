@@ -13,6 +13,7 @@ import pulsar
 from ..config.settings import settings
 from ..model.events import DeviceState, FrameEvent
 from ..service.hls_generator import HLSGenerator
+from ..service.redis_playlist_store import RedisPlaylistStore
 from ..service.redis_session_store import RedisSessionStore
 from ..service.storage_backend import sanitize_path_component
 from ..service.watermark_service import WatermarkService
@@ -79,6 +80,14 @@ class StreamProcessorConsumer:
         if use_redis and settings.redis.enabled and self.archive_config.enabled:
             self.session_store = RedisSessionStore()
             logger.info("Redis session tracking enabled for offline detection")
+
+        # Redis playlist store for dynamic playlist generation
+        # Stores segment metadata for on-the-fly playlist generation by quarkus
+        self.playlist_store: RedisPlaylistStore | None = None
+
+        if use_redis and settings.redis.enabled and settings.redis.playlist_enabled:
+            self.playlist_store = RedisPlaylistStore()
+            logger.info("Redis playlist store enabled for dynamic playlist generation")
 
     def _get_or_create_state(self, client_id: str, device_id: str) -> DeviceState:
         """Get or create device state using client_id:device_id key."""
@@ -153,6 +162,20 @@ class StreamProcessorConsumer:
             ):
                 await self._generate_segment(state)
 
+    async def _add_segment_to_playlist(
+        self, client_id: str, device_id: str, segment_number: int
+    ) -> None:
+        """Add segment to playlist store in Redis for dynamic playlist generation."""
+        if not self.playlist_store:
+            return
+        try:
+            await self.playlist_store.add_segment(client_id, device_id, segment_number)
+        except Exception as e:
+            logger.warning(
+                f"Failed to add segment to playlist store "
+                f"(client={client_id}, device={device_id}, segment={segment_number}): {e}"
+            )
+
     async def _generate_segment(self, state: DeviceState) -> None:
         """Generate HLS segment from accumulated frames."""
         client_id = state.client_id
@@ -188,6 +211,8 @@ class StreamProcessorConsumer:
                 # Update session segment info in Redis (for offline-checker service)
                 if self.session_store:
                     await self.session_store.update_segment(client_id, device_id, segment_number)
+
+                await self._add_segment_to_playlist(client_id, device_id, segment_number)
             else:
                 logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 
@@ -258,6 +283,7 @@ class StreamProcessorConsumer:
         logger.info(f"Subscription: {self.config.subscription}")
         logger.info(f"Max Workers: {self.processing_config.max_workers}")
         logger.info(f"Redis session tracking: {'enabled' if self.session_store else 'disabled'}")
+        logger.info(f"Redis playlist store: {'enabled' if self.playlist_store else 'disabled'}")
         logger.info(f"Watermark: {'enabled' if self.watermark_service else 'disabled'}")
         logger.info("=" * 80)
 
@@ -265,6 +291,10 @@ class StreamProcessorConsumer:
             # Connect to Redis if session store is configured
             if self.session_store:
                 await self.session_store.connect()
+
+            # Connect to Redis if playlist store is configured
+            if self.playlist_store:
+                await self.playlist_store.connect()
 
             # Map Python logging level to Pulsar LoggerLevel
             log_level = get_log_level()
@@ -330,41 +360,47 @@ class StreamProcessorConsumer:
         finally:
             await self.stop()
 
+    async def _flush_pending_frames(self) -> None:
+        """Process any remaining frames for all devices."""
+        for state_key, state in self.device_states.items():
+            if not state.pending_frames:
+                continue
+            logger.info(f"Processing remaining frames for {state_key}")
+            try:
+                await self._generate_segment(state)
+            except Exception as e:
+                logger.error(f"Error processing remaining frames: {e}")
+
+    async def _close_async_resource(self, resource, name: str) -> None:
+        """Safely close an async resource with error logging."""
+        if not resource:
+            return
+        try:
+            await resource.close()
+        except Exception as e:
+            logger.error(f"Error closing {name}: {e}")
+
+    def _close_sync_resource(self, resource, name: str) -> None:
+        """Safely close a sync resource with error logging."""
+        if not resource:
+            return
+        try:
+            resource.close()
+        except Exception as e:
+            logger.error(f"Error closing {name}: {e}")
+
     async def stop(self) -> None:
         """Stop the consumer gracefully."""
         logger.info("Stopping consumer...")
         self.running = False
 
-        # Process any remaining frames
-        for state_key, state in self.device_states.items():
-            if state.pending_frames:
-                logger.info(f"Processing remaining frames for {state_key}")
-                try:
-                    await self._generate_segment(state)
-                except Exception as e:
-                    logger.error(f"Error processing remaining frames: {e}")
+        await self._flush_pending_frames()
+        await self._close_async_resource(self.session_store, "Redis session store")
+        await self._close_async_resource(self.playlist_store, "Redis playlist store")
 
-        # Close Redis session store
-        if self.session_store:
-            try:
-                await self.session_store.close()
-            except Exception as e:
-                logger.error(f"Error closing Redis session store: {e}")
-
-        # Shutdown executor
         self.executor.shutdown(wait=True)
 
-        # Close Pulsar resources
-        if self.consumer:
-            try:
-                self.consumer.close()
-            except Exception as e:
-                logger.error(f"Error closing consumer: {e}")
-
-        if self.client:
-            try:
-                self.client.close()
-            except Exception as e:
-                logger.error(f"Error closing client: {e}")
+        self._close_sync_resource(self.consumer, "consumer")
+        self._close_sync_resource(self.client, "client")
 
         logger.info("Consumer stopped")
