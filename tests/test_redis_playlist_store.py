@@ -13,7 +13,7 @@ class TestRedisPlaylistStoreAddSegment:
     ):
         """Test that add_segment returns True when adding a new segment."""
         result = await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
         )
 
         assert result is True
@@ -24,12 +24,12 @@ class TestRedisPlaylistStoreAddSegment:
         """Test that add_segment returns False when segment already exists."""
         # Add segment first time
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
         )
 
         # Try to add same segment again (updates score, returns False)
         result = await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574500.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574500
         )
 
         assert result is False
@@ -57,13 +57,13 @@ class TestRedisPlaylistStoreAddSegment:
     ):
         """Test adding multiple segments."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=1705574430.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=1705574430
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=102, timestamp=1705574460.0
+            sample_client_id, sample_device_id, segment_number=102, timestamp=1705574460
         )
 
         count = await playlist_store.get_segment_count(sample_client_id, sample_device_id)
@@ -78,7 +78,7 @@ class TestRedisPlaylistStoreRemoveSegment:
     ):
         """Test that remove_segment returns True when segment exists."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
         )
 
         result = await playlist_store.remove_segment(
@@ -102,10 +102,10 @@ class TestRedisPlaylistStoreRemoveSegment:
     ):
         """Test that removing a segment decreases the count."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=1705574430.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=1705574430
         )
 
         assert await playlist_store.get_segment_count(sample_client_id, sample_device_id) == 2
@@ -124,21 +124,21 @@ class TestRedisPlaylistStoreRemoveSegmentsBefore:
         """Test that only segments older than cutoff are removed."""
         # Add segments with different timestamps
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0  # Old
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000  # Old
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0  # Old
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000  # Old
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=102, timestamp=3000.0  # New
+            sample_client_id, sample_device_id, segment_number=102, timestamp=3000  # New
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=103, timestamp=4000.0  # New
+            sample_client_id, sample_device_id, segment_number=103, timestamp=4000  # New
         )
 
         # Remove segments before timestamp 2500
         removed = await playlist_store.remove_segments_before(
-            sample_client_id, sample_device_id, cutoff_timestamp=2500.0
+            sample_client_id, sample_device_id, cutoff_timestamp=2500
         )
 
         assert removed == 2
@@ -159,15 +159,15 @@ class TestRedisPlaylistStoreRemoveSegmentsBefore:
     ):
         """Test that zero is returned when all segments are recent."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=5000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=5000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=6000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=6000
         )
 
         # Try to remove segments before timestamp 1000 (none qualify)
         removed = await playlist_store.remove_segments_before(
-            sample_client_id, sample_device_id, cutoff_timestamp=1000.0
+            sample_client_id, sample_device_id, cutoff_timestamp=1000
         )
 
         assert removed == 0
@@ -178,15 +178,15 @@ class TestRedisPlaylistStoreRemoveSegmentsBefore:
     ):
         """Test that all segments are removed when all are old."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
 
         # Remove all segments (cutoff far in the future)
         removed = await playlist_store.remove_segments_before(
-            sample_client_id, sample_device_id, cutoff_timestamp=9999999.0
+            sample_client_id, sample_device_id, cutoff_timestamp=9999999
         )
 
         assert removed == 2
@@ -197,7 +197,7 @@ class TestRedisPlaylistStoreRemoveSegmentsBefore:
     ):
         """Test that remove_segments_before works on empty store."""
         removed = await playlist_store.remove_segments_before(
-            sample_client_id, sample_device_id, cutoff_timestamp=9999999.0
+            sample_client_id, sample_device_id, cutoff_timestamp=9999999
         )
 
         assert removed == 0
@@ -211,21 +211,21 @@ class TestRedisPlaylistStoreGetSegments:
     ):
         """Test that get_segments returns segments within the time range."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=102, timestamp=3000.0
+            sample_client_id, sample_device_id, segment_number=102, timestamp=3000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=103, timestamp=4000.0
+            sample_client_id, sample_device_id, segment_number=103, timestamp=4000
         )
 
         # Get segments in range 1500-3500
         segments = await playlist_store.get_segments(
-            sample_client_id, sample_device_id, from_timestamp=1500.0, to_timestamp=3500.0
+            sample_client_id, sample_device_id, from_timestamp=1500, to_timestamp=3500
         )
 
         assert len(segments) == 2
@@ -238,15 +238,15 @@ class TestRedisPlaylistStoreGetSegments:
     ):
         """Test that get_segments returns empty list when no segments in range."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
 
         # Query range with no segments
         segments = await playlist_store.get_segments(
-            sample_client_id, sample_device_id, from_timestamp=5000.0, to_timestamp=6000.0
+            sample_client_id, sample_device_id, from_timestamp=5000, to_timestamp=6000
         )
 
         assert len(segments) == 0
@@ -267,13 +267,13 @@ class TestRedisPlaylistStoreGetSegments:
         """Test that segments are returned ordered by timestamp."""
         # Add segments in non-sequential order
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=102, timestamp=3000.0
+            sample_client_id, sample_device_id, segment_number=102, timestamp=3000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
 
         segments = await playlist_store.get_segments(
@@ -290,7 +290,7 @@ class TestRedisPlaylistStoreGetSegments:
     ):
         """Test that get_segments returns tuples of (segment_number, timestamp)."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
         )
 
         segments = await playlist_store.get_segments(
@@ -300,7 +300,7 @@ class TestRedisPlaylistStoreGetSegments:
         assert len(segments) == 1
         segment_num, timestamp = segments[0]
         assert segment_num == 100
-        assert timestamp == 1705574400.0
+        assert int(timestamp) == 1705574400
 
 
 class TestRedisPlaylistStoreGetSegmentCount:
@@ -311,13 +311,13 @@ class TestRedisPlaylistStoreGetSegmentCount:
     ):
         """Test that get_segment_count returns the correct count."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=102, timestamp=3000.0
+            sample_client_id, sample_device_id, segment_number=102, timestamp=3000
         )
 
         count = await playlist_store.get_segment_count(sample_client_id, sample_device_id)
@@ -349,7 +349,7 @@ class TestRedisPlaylistStoreDeletePlaylist:
     ):
         """Test that delete_playlist returns True when playlist exists."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
 
         result = await playlist_store.delete_playlist(sample_client_id, sample_device_id)
@@ -369,13 +369,13 @@ class TestRedisPlaylistStoreDeletePlaylist:
     ):
         """Test that delete_playlist removes all segments for the device."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=102, timestamp=3000.0
+            sample_client_id, sample_device_id, segment_number=102, timestamp=3000
         )
 
         await playlist_store.delete_playlist(sample_client_id, sample_device_id)
@@ -396,15 +396,15 @@ class TestRedisPlaylistStoreMultipleDevices:
 
         # Add segments to device1
         await playlist_store.add_segment(
-            sample_client_id, device1, segment_number=100, timestamp=1000.0
+            sample_client_id, device1, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, device1, segment_number=101, timestamp=2000.0
+            sample_client_id, device1, segment_number=101, timestamp=2000
         )
 
         # Add segments to device2
         await playlist_store.add_segment(
-            sample_client_id, device2, segment_number=200, timestamp=1000.0
+            sample_client_id, device2, segment_number=200, timestamp=1000
         )
 
         # Verify counts are separate
@@ -433,12 +433,12 @@ class TestRedisPlaylistStoreMultipleDevices:
 
         # Add segments to client1
         await playlist_store.add_segment(
-            client1, sample_device_id, segment_number=100, timestamp=1000.0
+            client1, sample_device_id, segment_number=100, timestamp=1000
         )
 
         # Add segments to client2
         await playlist_store.add_segment(
-            client2, sample_device_id, segment_number=200, timestamp=1000.0
+            client2, sample_device_id, segment_number=200, timestamp=1000
         )
 
         # Verify counts are separate
@@ -454,10 +454,10 @@ class TestRedisPlaylistStoreMultipleDevices:
 
         # Add segments to both devices
         await playlist_store.add_segment(
-            sample_client_id, device1, segment_number=100, timestamp=1000.0
+            sample_client_id, device1, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, device2, segment_number=200, timestamp=1000.0
+            sample_client_id, device2, segment_number=200, timestamp=1000
         )
 
         # Delete only device1's playlist
@@ -476,7 +476,7 @@ class TestRedisPlaylistStoreKeyFormat:
     ):
         """Test that the Redis key format is correct."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
 
         # Check that the key exists with the expected format
@@ -490,10 +490,10 @@ class TestRedisPlaylistStoreKeyFormat:
     ):
         """Test that segments are stored as a sorted set (ZSET)."""
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=100, timestamp=1000.0
+            sample_client_id, sample_device_id, segment_number=100, timestamp=1000
         )
         await playlist_store.add_segment(
-            sample_client_id, sample_device_id, segment_number=101, timestamp=2000.0
+            sample_client_id, sample_device_id, segment_number=101, timestamp=2000
         )
 
         key = f"hls:segments:{sample_client_id}:{sample_device_id}"
@@ -503,5 +503,7 @@ class TestRedisPlaylistStoreKeyFormat:
 
         assert len(members) == 2
         # Members should be (member, score) tuples
-        assert ("100", 1000.0) in members
-        assert ("101", 2000.0) in members
+        # Convert to int for comparison since Redis returns floats
+        members_int = [(m, int(s)) for m, s in members]
+        assert ("100", 1000) in members_int
+        assert ("101", 2000) in members_int
