@@ -201,14 +201,16 @@ class WatermarkService:
         """
         Apply watermark to a GCS-stored frame.
 
-        Returns local path to watermarked file instead of uploading back to GCS.
-        This optimizes the flow by avoiding a second download when FFmpeg processes the frame.
-        The HLSGenerator will handle cleanup of the temporary file after segment generation.
+        Downloads the frame, applies watermark, uploads back to GCS (replacing original),
+        and returns local path to watermarked file for FFmpeg processing.
         """
         import re
 
+        from ..utils.logger import get_logger
+
+        logger = get_logger(__name__)
+
         # Parse GCS path: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
-        # Expected format: gs://bucket/client_ids/{client_id}/device_id/{device_id}/frames/{filename}
         match = re.match(r"gs://[^/]+/client_ids/([^/]+)/device_id/([^/]+)/(.+)", gcs_path)
 
         if not match:
@@ -218,7 +220,7 @@ class WatermarkService:
         device_id = match.group(2)
         subpath = match.group(3)
 
-        # Download the file from GCS (only once!)
+        # Download the file from GCS
         file_data = self.storage.read_file(client_id, device_id, subpath)
         if file_data is None:
             raise FileNotFoundError(f"Frame not found in storage: {gcs_path}")
@@ -234,7 +236,6 @@ class WatermarkService:
                 tmp_in_path = Path(tmp_in.name)
 
             # Create a temporary file for the watermarked output
-            # Don't delete it automatically - let HLSGenerator clean it up after FFmpeg processing
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
                 tmp_out_path = Path(tmp_out.name)
 
@@ -270,19 +271,27 @@ class WatermarkService:
                 # Draw white text
                 draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
 
-                # Save to temp output file (this will be used by FFmpeg)
+                # Save to temp output file
                 image.save(tmp_out_path, quality=95)
 
-            # Return the local temp path instead of uploading back to GCS
-            # FFmpeg will read this file, then HLSGenerator will clean it up
+            # Upload watermarked frame back to GCS (replacing original)
+            with open(tmp_out_path, "rb") as f:
+                watermarked_data = f.read()
+
+            self.storage.write_file(
+                client_id, device_id, subpath, watermarked_data, content_type="image/jpeg"
+            )
+            logger.debug(f"Watermarked frame uploaded to GCS: {gcs_path}")
+
+            # Return the local temp path for FFmpeg processing
             return str(tmp_out_path)
 
         except Exception:
-            # If an error occurs, clean up both temp files
+            # If an error occurs, clean up temp output file
             if tmp_out_path and tmp_out_path.exists():
                 tmp_out_path.unlink()
             raise
         finally:
-            # Always clean up input temp file (we only need the output)
+            # Always clean up input temp file
             if tmp_in_path and tmp_in_path.exists():
                 tmp_in_path.unlink()
