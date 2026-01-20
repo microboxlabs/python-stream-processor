@@ -5,7 +5,6 @@ This service consumes frame events from Pulsar and generates HLS live streams
 with 24-hour rolling windows per device.
 """
 
-import os
 import asyncio
 import os
 import signal
