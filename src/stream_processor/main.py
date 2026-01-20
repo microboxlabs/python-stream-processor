@@ -30,6 +30,7 @@ Commands:
   offline-checker  Run the offline detection service
   cleanup          Clean up old HLS segments and frames
   archive-cleanup  Clean up expired archives
+  reset-device     Reset all data for a specific device
 
 Examples:
   stream-processor consumer
@@ -37,6 +38,8 @@ Examples:
   stream-processor offline-checker --once
   stream-processor cleanup
   stream-processor archive-cleanup
+  stream-processor reset-device --client-id abc123 --device-id device001
+  stream-processor reset-device -c abc123 -d device001 --dry-run
         """,
     )
 
@@ -88,6 +91,37 @@ Examples:
         help="Clean up expired archives (runs once, for CronJob use)",
     )
 
+    # Reset device command
+    reset_parser = subparsers.add_parser(
+        "reset-device",
+        help="Reset all data for a specific device (Redis, storage, database)",
+    )
+    reset_parser.add_argument(
+        "-c", "--client-id",
+        required=True,
+        help="Client identifier",
+    )
+    reset_parser.add_argument(
+        "-d", "--device-id",
+        required=True,
+        help="Device identifier",
+    )
+    reset_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without actually deleting",
+    )
+    reset_parser.add_argument(
+        "--skip-redis",
+        action="store_true",
+        help="Skip Redis cleanup (segments, sessions)",
+    )
+    reset_parser.add_argument(
+        "--skip-storage",
+        action="store_true",
+        help="Skip storage cleanup (frames, HLS files)",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -105,6 +139,14 @@ Examples:
         run_cleanup()
     elif args.command == "archive-cleanup":
         run_archive_cleanup()
+    elif args.command == "reset-device":
+        run_reset_device(
+            client_id=args.client_id,
+            device_id=args.device_id,
+            dry_run=getattr(args, "dry_run", False),
+            skip_redis=getattr(args, "skip_redis", False),
+            skip_storage=getattr(args, "skip_storage", False),
+        )
     else:
         parser.print_help()
         sys.exit(1)
@@ -231,6 +273,63 @@ def run_archive_cleanup() -> None:
         sys.exit(1)
     finally:
         loop.run_until_complete(archive_service.close())
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+
+def run_reset_device(
+    client_id: str,
+    device_id: str,
+    dry_run: bool = False,
+    skip_redis: bool = False,
+    skip_storage: bool = False,
+) -> None:
+    """Reset all data for a specific device."""
+    from .service.device_reset_service import DeviceResetService
+
+    logger.info("=" * 80)
+    logger.info("Stream Processor - Device Reset")
+    logger.info(f"Client ID: {client_id}")
+    logger.info(f"Device ID: {device_id}")
+    logger.info(f"Dry Run: {dry_run}")
+    logger.info(f"Skip Redis: {skip_redis}")
+    logger.info(f"Skip Storage: {skip_storage}")
+    logger.info("=" * 80)
+
+    reset_service = DeviceResetService()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        result = loop.run_until_complete(
+            reset_service.reset_device(
+                client_id=client_id,
+                device_id=device_id,
+                dry_run=dry_run,
+                skip_redis=skip_redis,
+                skip_storage=skip_storage,
+            )
+        )
+
+        logger.info("=" * 80)
+        logger.info("Reset Summary:")
+        for key, value in result.items():
+            logger.info(f"  {key}: {value}")
+        logger.info("=" * 80)
+
+        if dry_run:
+            logger.info("Dry run complete - no data was deleted")
+        else:
+            logger.info("Device reset complete")
+
+    except KeyboardInterrupt:
+        logger.info("Keyboard interrupt received")
+    except Exception as e:
+        logger.error(f"Device reset error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        loop.run_until_complete(reset_service.close())
         loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
 
