@@ -54,10 +54,12 @@ class ProcessingConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="PROCESSING_", extra="ignore")
 
     max_workers: int = Field(default=50, description="Max concurrent FFmpeg workers")
-    segment_duration_seconds: int = Field(default=30, description="HLS segment duration")
-    frames_per_segment: int = Field(default=6, description="Frames per segment (at 5s intervals)")
+    segment_duration_seconds: int = Field(default=6, description="HLS segment duration (playback)")
+    frames_per_segment: int = Field(default=6, description="Frames per segment")
     retention_hours: int = Field(default=24, description="Hours of video to retain")
-    frame_interval_seconds: int = Field(default=5, description="Expected interval between frames")
+    frame_interval_seconds: int = Field(default=1, description="Display duration per frame in output video")
+    frame_capture_interval_seconds: int = Field(default=5, description="Expected real-time interval between frame captures")
+    max_segment_wait_seconds: int = Field(default=60, description="Max seconds to wait for frames before forcing segment generation")
     output_framerate: int = Field(default=1, description="Output video framerate")
     video_width: int = Field(default=1920, description="Output video width")
 

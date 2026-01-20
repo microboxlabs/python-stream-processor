@@ -102,8 +102,11 @@ STORAGE_BASE_PATH=/storage/streams
 
 # Processing Configuration
 PROCESSING_MAX_WORKERS=50
-PROCESSING_SEGMENT_DURATION_SECONDS=30
-PROCESSING_FRAMES_PER_SEGMENT=6
+PROCESSING_SEGMENT_DURATION_SECONDS=6       # HLS segment playback duration
+PROCESSING_FRAMES_PER_SEGMENT=6             # Frames to accumulate per segment
+PROCESSING_FRAME_INTERVAL_SECONDS=1         # Display duration per frame in video
+PROCESSING_FRAME_CAPTURE_INTERVAL_SECONDS=5 # Real-time interval between frame captures
+PROCESSING_MAX_SEGMENT_WAIT_SECONDS=60      # Max wait before forcing segment generation
 PROCESSING_RETENTION_HOURS=24
 
 # Redis Configuration (optional)
@@ -248,11 +251,11 @@ Example playlist (`playlist.m3u8`):
 ```m3u8
 #EXTM3U
 #EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:30
+#EXT-X-TARGETDURATION:6
 #EXT-X-MEDIA-SEQUENCE:100
-#EXTINF:30.0,
+#EXTINF:6.0,
 segments/seg_000100.ts
-#EXTINF:30.0,
+#EXTINF:6.0,
 segments/seg_000101.ts
 ...
 ```

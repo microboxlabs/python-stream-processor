@@ -108,14 +108,14 @@ class HLSGenerator:
 
         try:
             with os.fdopen(fd, "w") as f:
-                for frame_path in sorted(frames):
+                for frame_path in frames:
                     # Each frame should display for frame_interval_seconds
                     f.write(f"file '{frame_path}'\n")
                     f.write(f"duration {self.config.frame_interval_seconds}\n")
 
                 # FFmpeg concat requires repeating last file for duration
                 if frames:
-                    f.write(f"file '{sorted(frames)[-1]}'\n")
+                    f.write(f"file '{frames[-1]}'\n")
 
         except Exception:
             os.unlink(list_path)
@@ -209,9 +209,15 @@ class HLSGenerator:
             return None
 
         logger.debug(f"Input frames: {len(local_frames)}")
+        for i, frame in enumerate(local_frames):
+            logger.debug(f"  Frame {i}: {frame}")
 
         # Create input file list
         input_list_path = self._create_input_file_list(local_frames)
+
+        # Debug: log input file contents
+        with open(input_list_path) as f:
+            logger.debug(f"FFmpeg input file contents:\n{f.read()}")
 
         # Determine output path based on storage type
         output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")

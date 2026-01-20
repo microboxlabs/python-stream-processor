@@ -158,7 +158,7 @@ class StreamProcessorConsumer:
             # Check if we should generate a segment
             if state.should_generate_segment(
                 self.processing_config.frames_per_segment,
-                max_wait_seconds=self.processing_config.segment_duration_seconds,
+                max_wait_seconds=self.processing_config.max_segment_wait_seconds,
             ):
                 await self._generate_segment(state)
 
@@ -260,14 +260,14 @@ class StreamProcessorConsumer:
             for state_key, state in list(self.device_states.items()):
                 if state.should_generate_segment(
                     self.processing_config.frames_per_segment,
-                    max_wait_seconds=self.processing_config.segment_duration_seconds,
+                    max_wait_seconds=self.processing_config.max_segment_wait_seconds,
                 ):
                     lock = self._get_device_lock(state_key)
                     if not lock.locked():
                         async with lock:
                             if state.should_generate_segment(
                                 self.processing_config.frames_per_segment,
-                                max_wait_seconds=self.processing_config.segment_duration_seconds,
+                                max_wait_seconds=self.processing_config.max_segment_wait_seconds,
                             ):
                                 await self._generate_segment(state)
 
