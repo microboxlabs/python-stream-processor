@@ -136,7 +136,7 @@ class StreamProcessorConsumer:
                 )
                 logger.debug(f"Watermark applied to {frame_path}")
             except Exception as e:
-                logger.error(f"Failed to apply watermark to {event.frame_path}: {e}", exc_info=True)
+                logger.error(f"Failed to apply watermark to {event.frame_path}: {e}")
                 # Continue with original frame path if watermarking fails
                 frame_path = event.frame_path
 
