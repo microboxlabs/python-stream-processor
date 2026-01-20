@@ -110,6 +110,10 @@ PROCESSING_RETENTION_HOURS=24
 REDIS_URL=redis://localhost:6379
 REDIS_ENABLED=false
 
+# Redis Playlist Metadata (optional, requires REDIS_ENABLED=true)
+# When enabled, segment metadata is stored in Redis for on-the-fly playlist generation
+REDIS_PLAYLIST_ENABLED=false
+
 # Metrics
 METRICS_PORT=9090
 ```
@@ -162,6 +166,28 @@ Cleans up expired deferred transmission archives (7 days default):
 # Run once (for Kubernetes CronJob)
 uv run python -m stream_processor.main archive-cleanup
 ```
+
+### Device Reset
+
+Resets all data for a specific device (useful for troubleshooting and testing):
+
+```bash
+# Preview what would be deleted (dry run)
+uv run python -m stream_processor.main reset-device -c CLIENT_ID -d DEVICE_ID --dry-run
+
+# Actually delete all device data
+uv run python -m stream_processor.main reset-device -c CLIENT_ID -d DEVICE_ID
+
+# Skip Redis cleanup (only reset storage)
+uv run python -m stream_processor.main reset-device -c CLIENT_ID -d DEVICE_ID --skip-redis
+
+# Skip storage cleanup (only reset Redis)
+uv run python -m stream_processor.main reset-device -c CLIENT_ID -d DEVICE_ID --skip-storage
+```
+
+**What gets deleted:**
+- **Redis**: Playlist segments (`hls:segments:{clientId}:{deviceId}`), session data (`stream:session:{clientId}:{deviceId}`)
+- **Storage**: Frames (`frames/*.jpg`), HLS segments (`hls/segments/seg_*.ts`), playlist (`hls/playlist.m3u8`)
 
 ### Help
 
