@@ -1,0 +1,13 @@
+file '/Users/korutx/Downloads/images/frames/20260119_145636_736_000.jpg'
+duration 1
+file '/Users/korutx/Downloads/images/frames/20260119_145641_741_000.jpg'
+duration 1
+file '/Users/korutx/Downloads/images/frames/20260119_145646_743_000.jpg'
+duration 1
+file '/Users/korutx/Downloads/images/frames/20260119_145651_749_000.jpg'
+duration 1
+file '/Users/korutx/Downloads/images/frames/20260119_145656_752_000.jpg'
+duration 1
+file '/Users/korutx/Downloads/images/frames/20260119_145701_755_000.jpg'
+duration 1
+file '/Users/korutx/Downloads/images/frames/20260119_145701_755_000.jpg'

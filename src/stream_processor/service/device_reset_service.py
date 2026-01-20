@@ -166,8 +166,7 @@ class DeviceResetService:
 
                     if dry_run:
                         logger.info(
-                            f"[DRY RUN] Would delete session from Redis "
-                            f"for {client_id}:{device_id}"
+                            f"[DRY RUN] Would delete session from Redis for {client_id}:{device_id}"
                         )
                     else:
                         await self.session_store.delete_session(client_id, device_id)
@@ -225,9 +224,7 @@ class DeviceResetService:
                 if dry_run:
                     logger.debug(f"[DRY RUN] Would delete segment: {file_info.name}")
                 else:
-                    self.storage.delete_file(
-                        client_id, device_id, f"hls/segments/{file_info.name}"
-                    )
+                    self.storage.delete_file(client_id, device_id, f"hls/segments/{file_info.name}")
                 segments_deleted += 1
 
             result.storage_segments_deleted = segments_deleted
@@ -256,9 +253,7 @@ class DeviceResetService:
             if playlist_data:
                 result.storage_playlist_deleted = True
                 if dry_run:
-                    logger.info(
-                        f"[DRY RUN] Would delete playlist.m3u8 for {client_id}:{device_id}"
-                    )
+                    logger.info(f"[DRY RUN] Would delete playlist.m3u8 for {client_id}:{device_id}")
                 else:
                     self.storage.delete_file(client_id, device_id, "hls/playlist.m3u8")
                     logger.info(f"Deleted playlist.m3u8 for {client_id}:{device_id}")

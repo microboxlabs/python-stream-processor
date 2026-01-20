@@ -57,9 +57,15 @@ class ProcessingConfig(BaseSettings):
     segment_duration_seconds: int = Field(default=6, description="HLS segment duration (playback)")
     frames_per_segment: int = Field(default=6, description="Frames per segment")
     retention_hours: int = Field(default=24, description="Hours of video to retain")
-    frame_interval_seconds: int = Field(default=1, description="Display duration per frame in output video")
-    frame_capture_interval_seconds: int = Field(default=5, description="Expected real-time interval between frame captures")
-    max_segment_wait_seconds: int = Field(default=60, description="Max seconds to wait for frames before forcing segment generation")
+    frame_interval_seconds: int = Field(
+        default=1, description="Display duration per frame in output video"
+    )
+    frame_capture_interval_seconds: int = Field(
+        default=5, description="Expected real-time interval between frame captures"
+    )
+    max_segment_wait_seconds: int = Field(
+        default=60, description="Max seconds to wait for frames before forcing segment generation"
+    )
     output_framerate: int = Field(default=1, description="Output video framerate")
     video_width: int = Field(default=1920, description="Output video width")
 

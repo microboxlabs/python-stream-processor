@@ -97,12 +97,14 @@ Examples:
         help="Reset all data for a specific device (Redis, storage, database)",
     )
     reset_parser.add_argument(
-        "-c", "--client-id",
+        "-c",
+        "--client-id",
         required=True,
         help="Client identifier",
     )
     reset_parser.add_argument(
-        "-d", "--device-id",
+        "-d",
+        "--device-id",
         required=True,
         help="Device identifier",
     )
