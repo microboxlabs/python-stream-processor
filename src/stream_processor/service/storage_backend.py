@@ -188,6 +188,15 @@ class StorageBackend(ABC):
         """
         pass
 
+    def cleanup_temp_files(self, max_age_seconds: int = 600) -> int:
+        """
+        Remove temporary files older than max_age_seconds.
+
+        Returns:
+            Number of files removed
+        """
+        return 0
+
     def _build_object_path(self, client_id: str, device_id: str, subpath: str) -> str:
         """Build the full object path from components."""
         safe_client = sanitize_path_component(client_id)
@@ -581,11 +590,49 @@ class GcsStorageBackend(StorageBackend):
         return uri
 
     def cleanup_temp(self) -> None:
-        """Clean up temporary files."""
+        """Clean up all temporary files."""
         import shutil
 
         if self._temp_dir.exists():
             shutil.rmtree(self._temp_dir, ignore_errors=True)
+
+    def cleanup_temp_files(self, max_age_seconds: int = 600) -> int:
+        """
+        Remove temporary files older than max_age_seconds and prune empty directories.
+
+        Returns:
+            Number of files removed
+        """
+        import time
+
+        if not self._temp_dir.exists():
+            return 0
+
+        now = time.time()
+        cutoff = now - max_age_seconds
+        removed = 0
+
+        # Remove old files
+        for file_path in self._temp_dir.rglob("*"):
+            if not file_path.is_file():
+                continue
+            try:
+                if file_path.stat().st_mtime < cutoff:
+                    file_path.unlink()
+                    removed += 1
+            except OSError:
+                pass
+
+        # Prune empty directories (bottom-up)
+        for dir_path in sorted(self._temp_dir.rglob("*"), reverse=True):
+            if not dir_path.is_dir():
+                continue
+            try:
+                dir_path.rmdir()  # only removes if empty
+            except OSError:
+                pass
+
+        return removed
 
     def download_gcs_uri_to_local(self, gcs_uri: str) -> Path | None:
         """

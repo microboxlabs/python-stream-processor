@@ -166,6 +166,11 @@ class CleanupService:
         # Also clean up old source frames
         await self._cleanup_frames(cutoff_timestamp)
 
+        # Clean up stale temporary files (GCS backend downloads/intermediates)
+        temp_removed = self.storage.cleanup_temp_files(max_age_seconds=600)
+        if temp_removed > 0:
+            logger.info(f"Cleaned up {temp_removed} stale temp files")
+
         duration = time.time() - start_time
         cleanup_duration_histogram.observe(duration)
 

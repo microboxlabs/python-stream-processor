@@ -192,41 +192,45 @@ class HLSGenerator:
 
         logger.info(f"Generating segment {segment_filename} for {device_id}")
 
-        # Prepare local paths for frames (downloads GCS frames if needed)
-        local_frames, downloaded_gcs_frames = self._prepare_frame_paths_for_ffmpeg(frames)
-
-        # Validate all frame paths exist before processing
-        missing_frames = [frame for frame in local_frames if not Path(frame).exists()]
-        if missing_frames:
-            logger.debug(
-                f"Skipping segment generation for {device_id}: "
-                f"{len(missing_frames)}/{len(local_frames)} frames missing"
-            )
-            return None
-
-        if not local_frames:
-            logger.debug(f"No valid frames for segment generation: {device_id}")
-            return None
-
-        logger.debug(f"Input frames: {len(local_frames)}")
-        for i, frame in enumerate(local_frames):
-            logger.debug(f"  Frame {i}: {frame}")
-
-        # Create input file list
-        input_list_path = self._create_input_file_list(local_frames)
-
-        # Debug: log input file contents
-        with open(input_list_path) as f:
-            logger.debug(f"FFmpeg input file contents:\n{f.read()}")
-
-        # Determine output path based on storage type
-        output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
-        if output_dir is None:
-            logger.error(f"Cannot get output directory for segments: {device_id}")
-            return None
-        segment_path = output_dir / segment_filename
+        # Initialize cleanup targets so the finally block is safe on any early exit
+        downloaded_gcs_frames: list[str] = []
+        input_list_path: str | None = None
 
         try:
+            # Prepare local paths for frames (downloads GCS frames if needed)
+            local_frames, downloaded_gcs_frames = self._prepare_frame_paths_for_ffmpeg(frames)
+
+            # Validate all frame paths exist before processing
+            missing_frames = [frame for frame in local_frames if not Path(frame).exists()]
+            if missing_frames:
+                logger.debug(
+                    f"Skipping segment generation for {device_id}: "
+                    f"{len(missing_frames)}/{len(local_frames)} frames missing"
+                )
+                return None
+
+            if not local_frames:
+                logger.debug(f"No valid frames for segment generation: {device_id}")
+                return None
+
+            logger.debug(f"Input frames: {len(local_frames)}")
+            for i, frame in enumerate(local_frames):
+                logger.debug(f"  Frame {i}: {frame}")
+
+            # Create input file list
+            input_list_path = self._create_input_file_list(local_frames)
+
+            # Debug: log input file contents
+            with open(input_list_path) as f:
+                logger.debug(f"FFmpeg input file contents:\n{f.read()}")
+
+            # Determine output path based on storage type
+            output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
+            if output_dir is None:
+                logger.error(f"Cannot get output directory for segments: {device_id}")
+                return None
+            segment_path = output_dir / segment_filename
+
             # FFmpeg command to generate segment
             # Using concat demuxer for frame sequence
             ffmpeg_cmd = [
@@ -313,11 +317,12 @@ class HLSGenerator:
             raise RuntimeError("FFmpeg timeout") from e
 
         finally:
-            # Clean up input list file
-            try:
-                os.unlink(input_list_path)
-            except Exception:
-                pass
+            # Clean up input list file (may be None if we returned before creating it)
+            if input_list_path is not None:
+                try:
+                    os.unlink(input_list_path)
+                except Exception:
+                    pass
 
             # Clean up downloaded GCS frames to avoid accumulating temp files
             for downloaded_frame in downloaded_gcs_frames:
