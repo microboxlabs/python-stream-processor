@@ -5,7 +5,11 @@ Creates deferred transmission archives when devices go offline.
 Generates VOD playlists and stores archive metadata in PostgreSQL.
 """
 
+import math
+import subprocess
+import tempfile
 from datetime import timedelta
+from pathlib import Path
 
 import asyncpg
 
@@ -134,6 +138,54 @@ class ArchiveService:
                 pass
             return None
 
+    def _probe_segment_duration(self, data: bytes) -> float:
+        """
+        Probe the actual playback duration of a TS segment using ffprobe.
+
+        The live playlist writer hard-codes EXTINF to the configured segment
+        duration, which does not always match the real content length (e.g. a
+        6-frame segment at 1 fps currently produces a 7 s file because of the
+        concat demuxer sentinel). Archives embed per-segment real durations
+        so HLS.js can compute an accurate MediaSource duration and scrub.
+
+        Returns:
+            Duration in seconds, or 0.0 if probing fails. A zero return tells
+            the caller to fall back to the configured default.
+        """
+        tmp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=".ts", prefix="probe_", delete=False
+            ) as tmp:
+                tmp.write(data)
+                tmp_path = Path(tmp.name)
+
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=nw=1:nk=1",
+                    str(tmp_path),
+                ],
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            return float(result.stdout.decode().strip())
+        except (subprocess.SubprocessError, ValueError) as e:
+            logger.warning(f"Failed to probe segment duration: {e}")
+            return 0.0
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
     async def _copy_segments(
         self,
         client_id: str,
@@ -141,7 +193,7 @@ class ArchiveService:
         first_segment: int,
         last_segment: int,
         archive_subpath: str,
-    ) -> list[str]:
+    ) -> list[tuple[str, float]]:
         """
         Copy segment files from live to archive location.
 
@@ -153,9 +205,11 @@ class ArchiveService:
             archive_subpath: Archive path (e.g., "archives/{session_id}")
 
         Returns:
-            List of copied segment filenames
+            List of (segment_filename, probed_duration_seconds) tuples. A
+            duration of 0.0 means probing failed and the caller should fall
+            back to the configured default.
         """
-        copied = []
+        copied: list[tuple[str, float]] = []
 
         # Ensure archive directory exists
         self.storage.ensure_directory_exists(client_id, device_id, f"{archive_subpath}/segments")
@@ -176,7 +230,10 @@ class ArchiveService:
                     data,
                     content_type="video/mp2t",
                 )
-                copied.append(seg_filename)
+                # Probe while the bytes are still in memory to avoid an
+                # extra round-trip to the storage backend.
+                duration = self._probe_segment_duration(data)
+                copied.append((seg_filename, duration))
             else:
                 logger.debug(f"Segment not found (may have been cleaned up): {src_subpath}")
 
@@ -188,7 +245,7 @@ class ArchiveService:
         client_id: str,
         device_id: str,
         archive_subpath: str,
-        copied_segments: list[str],
+        copied_segments: list[tuple[str, float]],
     ) -> None:
         """
         Generate a complete VOD playlist for the archive.
@@ -197,27 +254,46 @@ class ArchiveService:
         - Include #EXT-X-PLAYLIST-TYPE:VOD
         - Include #EXT-X-ENDLIST at the end
         - Start media sequence from 0
+        - Per-segment EXTINF values reflect the actual probed TS duration so
+          HLS.js can compute the correct MediaSource duration and scrub.
 
         Args:
             client_id: Client identifier
             device_id: Device identifier
             archive_subpath: Archive path
-            copied_segments: List of segment filenames that were copied
+            copied_segments: List of (segment_filename, probed_duration_seconds)
+                tuples. A duration of 0.0 means probing failed and the
+                configured default is used as a fallback.
         """
-        segment_duration = self.processing_config.segment_duration_seconds
+        fallback_duration = float(self.processing_config.segment_duration_seconds)
+
+        # TARGETDURATION must be >= any EXTINF, rounded up to an integer per
+        # the HLS spec. Fall back to the configured value if every probe
+        # failed (shouldn't happen, but keeps the playlist well-formed).
+        real_durations = [d for _, d in copied_segments if d > 0]
+        if real_durations:
+            target_duration = math.ceil(max(real_durations))
+        else:
+            target_duration = math.ceil(fallback_duration)
 
         # Build VOD playlist
         playlist_lines = [
             "#EXTM3U",
             "#EXT-X-VERSION:3",
-            f"#EXT-X-TARGETDURATION:{segment_duration}",
+            f"#EXT-X-TARGETDURATION:{target_duration}",
             "#EXT-X-PLAYLIST-TYPE:VOD",
             "#EXT-X-MEDIA-SEQUENCE:0",
         ]
 
-        # Add all copied segments in order
-        for seg_filename in sorted(copied_segments):
-            playlist_lines.append(f"#EXTINF:{segment_duration}.0,")
+        # Add all copied segments in order, using real probed durations.
+        probe_failures = 0
+        for seg_filename, duration in sorted(copied_segments, key=lambda x: x[0]):
+            if duration > 0:
+                extinf = duration
+            else:
+                extinf = fallback_duration
+                probe_failures += 1
+            playlist_lines.append(f"#EXTINF:{extinf:.3f},")
             playlist_lines.append(f"segments/{seg_filename}")
 
         # End marker for VOD
@@ -234,7 +310,16 @@ class ArchiveService:
             content_type="application/vnd.apple.mpegurl",
         )
 
-        logger.debug(f"VOD playlist generated for archive {archive_subpath}")
+        if probe_failures:
+            logger.warning(
+                f"VOD playlist generated for archive {archive_subpath} "
+                f"with {probe_failures} probe failures (used fallback duration)"
+            )
+        else:
+            logger.debug(
+                f"VOD playlist generated for archive {archive_subpath}: "
+                f"{len(copied_segments)} segments, target_duration={target_duration}"
+            )
 
     async def _store_archive_metadata(
         self,
