@@ -201,8 +201,11 @@ class WatermarkService:
         """
         Apply watermark to a GCS-stored frame.
 
-        Downloads the frame, applies watermark, uploads back to GCS (replacing original),
-        and returns local path to watermarked file for FFmpeg processing.
+        Downloads the frame, applies watermark, uploads the watermarked bytes back
+        to the same GCS object (replacing the original), and returns the original
+        GCS URI. Downstream consumers (hls_generator) will pull the watermarked
+        content from GCS into a managed temp directory whose lifecycle is owned
+        by the segment generator.
         """
         import re
 
@@ -283,15 +286,20 @@ class WatermarkService:
             )
             logger.debug(f"Watermarked frame uploaded to GCS: {gcs_path}")
 
-            # Return the local temp path for FFmpeg processing
-            return str(tmp_out_path)
+            # Return the original GCS URI — the object now contains the watermarked
+            # bytes, so downstream can treat it like any other GCS frame. Local temp
+            # files are cleaned in the finally block.
+            return gcs_path
 
-        except Exception:
-            # If an error occurs, clean up temp output file
-            if tmp_out_path and tmp_out_path.exists():
-                tmp_out_path.unlink()
-            raise
         finally:
-            # Always clean up input temp file
+            # Always clean up both temp files to avoid leaking /tmp/*.jpg
             if tmp_in_path and tmp_in_path.exists():
-                tmp_in_path.unlink()
+                try:
+                    tmp_in_path.unlink()
+                except OSError:
+                    pass
+            if tmp_out_path and tmp_out_path.exists():
+                try:
+                    tmp_out_path.unlink()
+                except OSError:
+                    pass
