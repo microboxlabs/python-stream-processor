@@ -60,6 +60,18 @@ class DeviceState(BaseModel):
     current_segment_number: int = Field(default=0, description="Current segment number")
     pending_frames: list[str] = Field(default_factory=list, description="Paths to pending frames")
     is_active: bool = Field(default=True, description="Whether device is actively streaming")
+    current_session_id: str | None = Field(
+        default=None,
+        description="Session UUID currently tracked for PTS-offset bookkeeping",
+    )
+    cumulative_segment_seconds: float = Field(
+        default=0.0,
+        description=(
+            "Sum of generated segment durations in the current session. "
+            "Passed to ffmpeg as -output_ts_offset so segments share a "
+            "continuous timeline and HLS players can scrub the archive."
+        ),
+    )
 
     @property
     def state_key(self) -> str:
@@ -80,6 +92,16 @@ class DeviceState(BaseModel):
         self.current_segment_number += 1
         self.last_segment_time = datetime.now(UTC)
         return frames
+
+    def reset_for_session(self, session_id: str) -> None:
+        """Bind state to a new session and reset PTS bookkeeping."""
+        self.current_session_id = session_id
+        self.cumulative_segment_seconds = 0.0
+
+    def advance_cumulative(self, segment_duration: float) -> None:
+        """Advance cumulative segment time after a successful generation."""
+        if segment_duration > 0:
+            self.cumulative_segment_seconds += segment_duration
 
     def should_generate_segment(self, frames_per_segment: int, max_wait_seconds: int = 60) -> bool:
         """

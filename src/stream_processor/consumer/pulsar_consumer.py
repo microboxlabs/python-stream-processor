@@ -147,9 +147,25 @@ class StreamProcessorConsumer:
             state.add_frame(frame_path, event.timestamp)
             frames_received_total.labels(device_id=state_key).inc()
 
-            # Update session activity in Redis (for offline-checker service)
+            # Update session activity in Redis (for offline-checker service).
+            # The returned SessionData lets us detect a session boundary and
+            # reset the per-session cumulative PTS offset so each archive
+            # starts at PTS=0 and stays continuous within the session.
             if self.session_store:
-                await self.session_store.update_activity(client_id, device_id)
+                session_data = await self.session_store.update_activity(
+                    client_id, device_id
+                )
+                if (
+                    session_data is not None
+                    and session_data.session_id != state.current_session_id
+                ):
+                    if state.current_session_id is not None:
+                        logger.info(
+                            f"Session boundary for {state_key}: "
+                            f"{state.current_session_id} -> {session_data.session_id}; "
+                            f"resetting PTS offset"
+                        )
+                    state.reset_for_session(session_data.session_id)
 
             logger.debug(
                 f"Frame received for {state_key}: {frame_path} (pending: {state.frame_count})"
@@ -191,22 +207,30 @@ class StreamProcessorConsumer:
         logger.info(f"Generating segment {segment_number} for {state_key} ({len(frames)} frames)")
 
         try:
-            # Run FFmpeg in thread pool
+            # Run FFmpeg in thread pool. Pass the per-session cumulative
+            # offset so the generated segment's PTS continues the timeline.
             loop = asyncio.get_event_loop()
-            segment_path = await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 self.executor,
                 self.hls_generator.generate_segment,
                 client_id,
                 device_id,
                 frames,
                 segment_number,
+                state.cumulative_segment_seconds,
             )
 
             # Clear pending frames (even if generation was skipped)
             state.clear_pending_frames()
 
-            if segment_path:
-                logger.info(f"Segment generated: {segment_path}")
+            if result:
+                final_uri, media_duration = result
+                state.advance_cumulative(media_duration)
+                logger.info(
+                    f"Segment generated: {final_uri} "
+                    f"(media={media_duration:.3f}s, "
+                    f"cumulative={state.cumulative_segment_seconds:.3f}s)"
+                )
 
                 # Update session segment info in Redis (for offline-checker service)
                 if self.session_store:

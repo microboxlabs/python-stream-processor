@@ -97,6 +97,35 @@ class HLSGenerator:
 
         return highest
 
+    def _probe_local_duration(self, path: Path) -> float:
+        """
+        Read the playback duration of a local TS file via ffprobe.
+
+        Returns 0.0 on failure; the caller treats that as "do not advance
+        cumulative offset" so a probe error never silently corrupts the
+        per-session timeline.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=nw=1:nk=1",
+                    str(path),
+                ],
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            return float(result.stdout.decode().strip())
+        except (subprocess.SubprocessError, ValueError) as e:
+            logger.warning(f"Failed to probe segment duration for {path}: {e}")
+            return 0.0
+
     def _create_input_file_list(self, frames: list[str]) -> str:
         """
         Create FFmpeg input file list for concat demuxer.
@@ -169,7 +198,8 @@ class HLSGenerator:
         device_id: str,
         frames: list[str],
         segment_number: int,
-    ) -> str | None:
+        output_ts_offset: float = 0.0,
+    ) -> tuple[str, float] | None:
         """
         Generate a single HLS segment from frames.
 
@@ -178,9 +208,17 @@ class HLSGenerator:
             device_id: Device identifier
             frames: List of frame paths to include
             segment_number: Segment sequence number
+            output_ts_offset: PTS offset (seconds) to apply via ffmpeg
+                `-output_ts_offset`. Pass the cumulative duration of
+                previously-generated segments in this session so the new
+                segment's timestamps continue the timeline; HLS players
+                rely on this for seeking.
 
         Returns:
-            Path/URI to generated segment file, or None if frames are missing
+            Tuple of (final URI/path, actual media duration in seconds), or
+            None if generation was skipped (e.g. missing frames). The
+            duration is read back via ffprobe so the caller can advance
+            its own cumulative offset for the next segment.
         """
         import time
 
@@ -265,6 +303,10 @@ class HLSGenerator:
                 "mpegts",
                 "-mpegts_copyts",
                 "1",
+                # Shift PTS so segments share a continuous timeline across
+                # the session — required for VOD seeking once archived.
+                "-output_ts_offset",
+                f"{output_ts_offset:.6f}",
                 str(segment_path),
             ]
 
@@ -284,7 +326,11 @@ class HLSGenerator:
                 raise RuntimeError(msg)
 
             segment_size = segment_path.stat().st_size
-            duration = time.time() - start_time
+            wall_duration = time.time() - start_time
+
+            # Probe the actual media duration so the caller can advance its
+            # cumulative PTS offset for the next segment.
+            media_duration = self._probe_local_duration(segment_path)
 
             # For GCS, upload the segment
             final_uri: str
@@ -297,16 +343,18 @@ class HLSGenerator:
 
             # Record metrics
             segments_generated_total.labels(device_id=device_id).inc()
-            ffmpeg_duration_histogram.labels(device_id=device_id).observe(duration)
+            ffmpeg_duration_histogram.labels(device_id=device_id).observe(wall_duration)
 
             logger.info(
-                f"Segment generated: {segment_filename} ({segment_size} bytes, {duration:.2f}s)"
+                f"Segment generated: {segment_filename} "
+                f"({segment_size} bytes, media={media_duration:.3f}s, "
+                f"wall={wall_duration:.2f}s, ts_offset={output_ts_offset:.3f}s)"
             )
 
             # Update playlist
             self._update_playlist(client_id, device_id, segment_number, segment_filename)
 
-            return final_uri
+            return final_uri, media_duration
 
         except subprocess.CalledProcessError as e:
             logger.error(f"FFmpeg failed: {e.stderr}")
