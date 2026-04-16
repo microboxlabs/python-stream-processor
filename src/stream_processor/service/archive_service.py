@@ -154,9 +154,7 @@ class ArchiveService:
         """
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile(
-                suffix=".ts", prefix="probe_", delete=False
-            ) as tmp:
+            with tempfile.NamedTemporaryFile(suffix=".ts", prefix="probe_", delete=False) as tmp:
                 tmp.write(data)
                 tmp_path = Path(tmp.name)
 

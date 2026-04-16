@@ -152,13 +152,8 @@ class StreamProcessorConsumer:
             # reset the per-session cumulative PTS offset so each archive
             # starts at PTS=0 and stays continuous within the session.
             if self.session_store:
-                session_data = await self.session_store.update_activity(
-                    client_id, device_id
-                )
-                if (
-                    session_data is not None
-                    and session_data.session_id != state.current_session_id
-                ):
+                session_data = await self.session_store.update_activity(client_id, device_id)
+                if session_data is not None and session_data.session_id != state.current_session_id:
                     if state.current_session_id is not None:
                         logger.info(
                             f"Session boundary for {state_key}: "

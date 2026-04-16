@@ -88,7 +88,10 @@ def _parse_segment_names(playlist_text: str) -> list[str]:
 
 
 async def _fetch_targets(
-    pool: asyncpg.Pool, session_id: str | None, limit: int | None
+    pool: asyncpg.Pool,
+    session_id: str | None,
+    device_id: str | None,
+    limit: int | None,
 ) -> list[asyncpg.Record]:
     if session_id is not None:
         return await pool.fetch(
@@ -100,16 +103,20 @@ async def _fetch_targets(
             session_id,
         )
 
-    query = """
+    base = """
         SELECT session_id, owner_client_id, device_id, archive_path
         FROM deferred_transmissions
         WHERE status = 'ready'
-        ORDER BY ended_at DESC
     """
+    params: list[object] = []
+    if device_id is not None:
+        params.append(device_id)
+        base += f" AND device_id = ${len(params)}"
+    base += " ORDER BY ended_at DESC"
     if limit is not None:
-        query += " LIMIT $1"
-        return await pool.fetch(query, limit)
-    return await pool.fetch(query)
+        params.append(limit)
+        base += f" LIMIT ${len(params)}"
+    return await pool.fetch(base, *params)
 
 
 async def _repair_one(
@@ -169,9 +176,7 @@ async def _repair_one(
             content_type="application/vnd.apple.mpegurl",
         )
     else:
-        await service._generate_vod_playlist(
-            owner_client_id, device_id, archive_path, probed
-        )
+        await service._generate_vod_playlist(owner_client_id, device_id, archive_path, probed)
     return len(probed), probe_failures
 
 
@@ -185,11 +190,9 @@ async def _run(args: argparse.Namespace) -> int:
             "are you sure you're pointing at production storage?"
         )
 
-    pool = await asyncpg.create_pool(
-        settings.archive.database_url, min_size=1, max_size=2
-    )
+    pool = await asyncpg.create_pool(settings.archive.database_url, min_size=1, max_size=2)
     try:
-        targets = await _fetch_targets(pool, args.session_id, args.limit)
+        targets = await _fetch_targets(pool, args.session_id, args.device_id, args.limit)
     finally:
         await pool.close()
 
@@ -213,8 +216,7 @@ async def _run(args: argparse.Namespace) -> int:
                 discontinuity=args.discontinuity,
             )
             logger.info(
-                f"Repaired {session_id}: {n_segments} segments "
-                f"({probe_failures} probe failures)"
+                f"Repaired {session_id}: {n_segments} segments ({probe_failures} probe failures)"
             )
             ok += 1
         except Exception as e:
@@ -232,6 +234,11 @@ def main() -> int:
     parser.add_argument(
         "--session-id",
         help="Repair a single archive by session UUID (default: all status='ready')",
+    )
+    parser.add_argument(
+        "--device-id",
+        help="Restrict bulk mode to one sanitized device id "
+        "(e.g. 30_dd_aa_03_11_0e). Ignored when --session-id is set.",
     )
     parser.add_argument(
         "--limit",
