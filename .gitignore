@@ -137,3 +137,8 @@ Thumbs.db
 *.ts
 *.m3u8
 
+# Service account keys — never commit
+.frame-sa.key.json
+*-sa.key.json
+*.key.json
+
