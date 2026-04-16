@@ -203,8 +203,10 @@ async def _fetch_targets(
     device_id: str | None,
     limit: int | None,
 ) -> list[asyncpg.Record]:
+    # Routing pool.fetch through a typed local satisfies mypy's no-any-return
+    # check — asyncpg's stubs declare fetch() as returning Any.
     if session_id is not None:
-        return await pool.fetch(
+        rows: list[asyncpg.Record] = await pool.fetch(
             """
             SELECT session_id, owner_client_id, device_id, archive_path
             FROM deferred_transmissions
@@ -212,6 +214,7 @@ async def _fetch_targets(
             """,
             session_id,
         )
+        return rows
 
     base = """
         SELECT session_id, owner_client_id, device_id, archive_path
@@ -226,7 +229,8 @@ async def _fetch_targets(
     if limit is not None:
         params.append(limit)
         base += f" LIMIT ${len(params)}"
-    return await pool.fetch(base, *params)
+    rows = await pool.fetch(base, *params)
+    return rows
 
 
 async def _remux_one(
