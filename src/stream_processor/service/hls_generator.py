@@ -445,12 +445,11 @@ class HLSGenerator:
             local_frames, downloaded_gcs_frames = self._prepare_frame_paths_for_ffmpeg(
                 usable_frames
             )
-            if len(local_frames) != len(usable_frames) or any(
-                not Path(f).exists() for f in local_frames
-            ):
+            missing = [f for f in local_frames if not Path(f).exists()]
+            if missing or len(local_frames) != len(usable_frames):
+                unresolved = len(usable_frames) - len(local_frames) + len(missing)
                 logger.warning(
-                    f"Skipping batch for {device_id}: "
-                    f"{len(usable_frames) - len(local_frames)} frames unresolved/missing"
+                    f"Skipping batch for {device_id}: {unresolved} frames unresolved/missing"
                 )
                 return []
 
@@ -536,26 +535,16 @@ class HLSGenerator:
 
             durations = self._parse_extinf(batch_playlist_path)
             wall_duration = time.time() - start_time
-            wall_per_segment = wall_duration / num_segments
 
-            results: list[tuple[int, float]] = []
-            for i in range(num_segments):
-                segment_number = base_segment_number + i
-                segment_filename = f"seg_{segment_number:06d}.ts"
-                segment_path = output_dir / segment_filename
-                if not segment_path.exists():
-                    logger.warning(f"Batch segment missing after encode: {segment_filename}")
-                    continue
-
-                if isinstance(self.storage, GcsStorageBackend):
-                    self.storage.sync_local_to_gcs(
-                        client_id, device_id, "hls/segments", segment_filename
-                    )
-
-                duration = durations[i] if i < len(durations) else float(segment_duration)
-                segments_generated_total.labels(device_id=device_id).inc()
-                ffmpeg_duration_histogram.labels(device_id=device_id).observe(wall_per_segment)
-                results.append((segment_number, duration))
+            results = self._collect_batch_results(
+                client_id,
+                device_id,
+                output_dir,
+                base_segment_number,
+                num_segments,
+                durations,
+                wall_duration / num_segments,
+            )
 
             if results:
                 # Refresh the filesystem rolling playlist to the last produced segment.
@@ -581,21 +570,49 @@ class HLSGenerator:
             raise RuntimeError("FFmpeg batch timeout") from e
 
         finally:
-            if input_list_path is not None:
-                try:
-                    os.unlink(input_list_path)
-                except Exception:
-                    pass
-            if batch_playlist_path is not None:
-                try:
-                    os.unlink(batch_playlist_path)
-                except Exception:
-                    pass
-            for downloaded_frame in downloaded_gcs_frames:
-                try:
-                    Path(downloaded_frame).unlink(missing_ok=True)
-                except Exception:
-                    pass
+            self._cleanup_temp_files([input_list_path, batch_playlist_path, *downloaded_gcs_frames])
+
+    def _collect_batch_results(
+        self,
+        client_id: str,
+        device_id: str,
+        output_dir: Path,
+        base_segment_number: int,
+        num_segments: int,
+        durations: list[float],
+        wall_per_segment: float,
+    ) -> list[tuple[int, float]]:
+        """Verify each produced segment, upload to GCS if needed, and record metrics."""
+        segment_duration = self.config.segment_duration_seconds
+        results: list[tuple[int, float]] = []
+        for i in range(num_segments):
+            segment_number = base_segment_number + i
+            segment_filename = f"seg_{segment_number:06d}.ts"
+            if not (output_dir / segment_filename).exists():
+                logger.warning(f"Batch segment missing after encode: {segment_filename}")
+                continue
+
+            if isinstance(self.storage, GcsStorageBackend):
+                self.storage.sync_local_to_gcs(
+                    client_id, device_id, "hls/segments", segment_filename
+                )
+
+            duration = durations[i] if i < len(durations) else float(segment_duration)
+            segments_generated_total.labels(device_id=device_id).inc()
+            ffmpeg_duration_histogram.labels(device_id=device_id).observe(wall_per_segment)
+            results.append((segment_number, duration))
+        return results
+
+    @staticmethod
+    def _cleanup_temp_files(paths: list[str | None]) -> None:
+        """Best-effort removal of temp files (input lists, batch playlists, GCS downloads)."""
+        for path in paths:
+            if not path:
+                continue
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _update_playlist(
         self,
