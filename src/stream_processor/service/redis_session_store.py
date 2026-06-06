@@ -146,6 +146,48 @@ class RedisSessionStore:
         """Get Redis key for a session."""
         return f"{SESSION_KEY_PREFIX}{client_id}:{device_id}"
 
+    @staticmethod
+    def _resolve_activity(
+        existing_json: str | None,
+        client_id: str,
+        device_id: str,
+        now: str,
+        captured: str | None,
+        expected_session_id: str | None,
+    ) -> tuple[SessionData, bool] | None:
+        """
+        Build the updated-or-new session for an activity tick.
+
+        Returns ``(session, is_new)``, or ``None`` when the update is stale (the
+        stored session_id no longer matches ``expected_session_id``). ``now`` is
+        wall-clock (offline detection); ``captured`` is the frame's capture time.
+        """
+        if existing_json:
+            session = SessionData.from_json(existing_json)
+            if expected_session_id is not None and session.session_id != expected_session_id:
+                return None
+            session.last_frame_at = now
+            if captured is not None:
+                if session.first_frame_captured_at is None:
+                    session.first_frame_captured_at = captured
+                session.last_frame_captured_at = captured
+            session.frame_count += 1
+            return session, False
+
+        new_session = SessionData(
+            client_id=client_id,
+            device_id=device_id,
+            session_id=str(uuid.uuid4()),
+            started_at=now,
+            last_frame_at=now,
+            first_segment_number=-1,
+            last_segment_number=-1,
+            frame_count=1,
+            first_frame_captured_at=captured,
+            last_frame_captured_at=captured,
+        )
+        return new_session, True
+
     async def update_activity(
         self,
         client_id: str,
@@ -184,43 +226,19 @@ class RedisSessionStore:
                 captured = frame_time.isoformat() if frame_time is not None else None
                 existing = await client.get(key)
 
-                if existing:
-                    session = SessionData.from_json(cast(str, existing))
-
-                    # Validate session_id if provided (reject stale updates)
-                    if (
-                        expected_session_id is not None
-                        and session.session_id != expected_session_id
-                    ):
-                        await client.unwatch()
-                        logger.debug(
-                            f"Ignoring stale activity update: {session.state_key} "
-                            f"expected={expected_session_id}, current={session.session_id}"
-                        )
-                        return None
-
-                    session.last_frame_at = now
-                    if captured is not None:
-                        if session.first_frame_captured_at is None:
-                            session.first_frame_captured_at = captured
-                        session.last_frame_captured_at = captured
-                    session.frame_count += 1
-                    is_new_session = False
-                else:
-                    # Create new session
-                    session = SessionData(
-                        client_id=client_id,
-                        device_id=device_id,
-                        session_id=str(uuid.uuid4()),
-                        started_at=now,
-                        last_frame_at=now,
-                        first_segment_number=-1,
-                        last_segment_number=-1,
-                        frame_count=1,
-                        first_frame_captured_at=captured,
-                        last_frame_captured_at=captured,
-                    )
-                    is_new_session = True
+                resolved = self._resolve_activity(
+                    cast("str | None", existing),
+                    client_id,
+                    device_id,
+                    now,
+                    captured,
+                    expected_session_id,
+                )
+                if resolved is None:
+                    await client.unwatch()
+                    logger.debug(f"Ignoring stale activity update for {state_key}")
+                    return None
+                session, is_new_session = resolved
 
                 # Execute atomically
                 async with client.pipeline(transaction=True) as pipe:
