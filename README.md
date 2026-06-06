@@ -261,6 +261,12 @@ end-to-end backpressure: when a device's queue fills, the receive loop stops
 pulling from Pulsar (which stops the broker delivering) instead of buffering
 frames unbounded in memory.
 
+The consumer pulls from Pulsar with **batch receive** so intake isn't capped at
+one receive round-trip per message — important when draining a backlog.
+`PROCESSING_RECEIVE_BATCH_SIZE` (messages per batch) and
+`PROCESSING_RECEIVE_BATCH_TIMEOUT_MS` (max wait to fill a batch) tune it without
+a code change.
+
 ### Segment numbering across pods
 
 Key_Shared pins each device to a single pod, so per-device segment numbering is

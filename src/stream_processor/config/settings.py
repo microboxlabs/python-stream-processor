@@ -72,6 +72,22 @@ class ProcessingConfig(BaseSettings):
             "when frames arrive sporadically (no new frame for max_segment_wait_seconds)."
         ),
     )
+    receive_batch_size: int = Field(
+        default=100,
+        description=(
+            "Max Pulsar messages pulled per batch_receive() call. Higher values "
+            "raise consumer intake throughput when draining a backlog (fewer "
+            "receive round-trips per message). Tune with PROCESSING_RECEIVE_BATCH_SIZE."
+        ),
+    )
+    receive_batch_timeout_ms: int = Field(
+        default=100,
+        description=(
+            "Max time batch_receive() waits to fill a batch before returning what "
+            "it has. Lower = lower latency when traffic is light; higher = larger "
+            "batches under load."
+        ),
+    )
     frame_interval_seconds: int = Field(
         default=1, description="Display duration per frame in output video"
     )
