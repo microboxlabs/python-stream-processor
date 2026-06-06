@@ -42,6 +42,11 @@ active_devices_gauge = Gauge(
     "Number of currently active devices",
 )
 
+queued_frames_gauge = Gauge(
+    "stream_processor_queued_frames",
+    "Total frames buffered across per-device worker queues awaiting segment generation",
+)
+
 
 # Histograms
 ffmpeg_duration_histogram = Histogram(

@@ -149,6 +149,16 @@ class DeviceResetService:
                 else:
                     logger.info(f"No segments in Redis for {client_id}:{device_id}")
 
+                # Clear the atomic segment counter so numbering restarts cleanly.
+                if not dry_run:
+                    deleted_seq = await self.playlist_store.delete_segment_counter(
+                        client_id, device_id
+                    )
+                    if deleted_seq:
+                        logger.info(
+                            f"Deleted segment counter from Redis for {client_id}:{device_id}"
+                        )
+
             except Exception as e:
                 error_msg = f"Error resetting Redis playlist: {e}"
                 logger.error(error_msg)
