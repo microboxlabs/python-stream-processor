@@ -67,6 +67,14 @@ class DeviceState(BaseModel):
     )
     current_segment_number: int = Field(default=0, description="Current segment number")
     pending_frames: list[str] = Field(default_factory=list, description="Paths to pending frames")
+    pending_request_times: list[datetime | None] = Field(
+        default_factory=list,
+        description=(
+            "Per-frame request timestamp (the moment we received the frame), parallel "
+            "to pending_frames. Used to watermark frames at generation time — in "
+            "parallel — instead of serially during accumulation."
+        ),
+    )
     is_active: bool = Field(default=True, description="Whether device is actively streaming")
     current_session_id: str | None = Field(
         default=None,
@@ -86,11 +94,18 @@ class DeviceState(BaseModel):
         """Unique key for this client/device combination."""
         return f"{self.client_id}:{self.device_id}"
 
-    def add_frame(self, frame_path: str, timestamp: datetime) -> None:
-        """Add a frame to pending frames."""
+    def add_frame(
+        self, frame_path: str, timestamp: datetime, request_time: datetime | None = None
+    ) -> None:
+        """Add a frame to pending frames.
+
+        ``timestamp`` is the capture time (used for content-time playlist ordering);
+        ``request_time`` is when we received the frame (used for the watermark).
+        """
         if not self.pending_frames:
             self.pending_first_frame_time = timestamp
         self.pending_frames.append(frame_path)
+        self.pending_request_times.append(request_time)
         self.frame_count = len(self.pending_frames)
         self.last_frame_time = timestamp
 
@@ -98,6 +113,7 @@ class DeviceState(BaseModel):
         """Clear and return pending frames after segment generation."""
         frames = self.pending_frames.copy()
         self.pending_frames = []
+        self.pending_request_times = []
         self.pending_first_frame_time = None
         self.frame_count = 0
         self.current_segment_number += 1
