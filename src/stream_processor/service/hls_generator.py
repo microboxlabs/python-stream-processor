@@ -379,6 +379,241 @@ class HLSGenerator:
                 except Exception:
                     pass
 
+    @staticmethod
+    def _parse_extinf(playlist_path: str) -> list[float]:
+        """Read per-segment durations from an HLS muxer playlist's #EXTINF lines."""
+        durations: list[float] = []
+        with open(playlist_path) as f:
+            for line in f:
+                if line.startswith("#EXTINF:"):
+                    durations.append(float(line[len("#EXTINF:") :].split(",")[0]))
+        return durations
+
+    def generate_segments_batch(
+        self,
+        client_id: str,
+        device_id: str,
+        frames: list[str],
+        base_segment_number: int,
+        output_ts_offset: float = 0.0,
+    ) -> list[tuple[int, float]]:
+        """
+        Catch-up encoder: turn many frames into many HLS segments in ONE FFmpeg
+        process via the HLS muxer (approach (a)). Far cheaper than one process
+        per segment when draining a backlog, and lets a single device saturate
+        the worker pool.
+
+        Only COMPLETE segments are produced: ``frames`` is truncated to a
+        multiple of ``frames_per_segment`` so every emitted segment is exactly
+        ``segment_duration_seconds`` (the playlist declares a uniform EXTINF, so
+        partial segments must not be emitted here). Segments are numbered
+        ``base_segment_number, base_segment_number+1, ...`` via ``-start_number``.
+
+        Args:
+            client_id: Client identifier
+            device_id: Device identifier
+            frames: Ordered frame paths (local or gs://). Truncated to a multiple
+                of frames_per_segment; leftover frames are the caller's to keep.
+            base_segment_number: Sequence number of the first produced segment.
+            output_ts_offset: PTS offset (seconds) for the first segment so the
+                batch continues the session timeline (archive/VOD seeking).
+
+        Returns:
+            ``[(segment_number, duration_seconds), ...]`` in order — one entry
+            per produced segment — or ``[]`` if skipped (too few/missing frames).
+        """
+        import time
+
+        start_time = time.time()
+
+        frames_per_segment = self.config.frames_per_segment
+        segment_duration = self.config.segment_duration_seconds
+
+        if not frames or len(frames) < frames_per_segment:
+            return []
+
+        num_segments = len(frames) // frames_per_segment
+        usable_frames = frames[: num_segments * frames_per_segment]
+
+        self._ensure_hls_directories(client_id, device_id)
+
+        downloaded_gcs_frames: list[str] = []
+        input_list_path: str | None = None
+        batch_playlist_path: str | None = None
+
+        try:
+            local_frames, downloaded_gcs_frames = self._prepare_frame_paths_for_ffmpeg(
+                usable_frames
+            )
+            missing = [f for f in local_frames if not Path(f).exists()]
+            if missing or len(local_frames) != len(usable_frames):
+                unresolved = len(usable_frames) - len(local_frames) + len(missing)
+                logger.warning(
+                    f"Skipping batch for {device_id}: {unresolved} frames unresolved/missing"
+                )
+                return []
+
+            input_list_path = self._create_input_file_list(local_frames)
+
+            output_dir = self.storage.get_local_directory(client_id, device_id, "hls/segments")
+            if output_dir is None:
+                logger.error(f"Cannot get output directory for segments: {device_id}")
+                return []
+
+            total_seconds = num_segments * segment_duration
+            fd, batch_playlist_path = tempfile.mkstemp(suffix=".m3u8", prefix="hls_batch_")
+            os.close(fd)
+
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                input_list_path,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-profile:v",
+                "baseline",
+                "-level",
+                "3.0",
+                "-vf",
+                f"scale={self.config.video_width}:-2",
+                "-pix_fmt",
+                "yuv420p",
+                "-r",
+                str(self.config.output_framerate),
+                "-fps_mode",
+                "cfr",
+                # Encode exactly num_segments * segment_duration; drops the concat
+                # tail frame so we emit only complete, uniform-length segments.
+                "-t",
+                str(total_seconds),
+                # Force a keyframe at every segment boundary so the HLS muxer cuts
+                # cleanly into exact segment_duration pieces.
+                "-force_key_frames",
+                f"expr:gte(t,n_forced*{segment_duration})",
+                # Continue the session timeline for archive/VOD seeking.
+                "-mpegts_copyts",
+                "1",
+                "-output_ts_offset",
+                f"{output_ts_offset:.6f}",
+                "-f",
+                "hls",
+                "-hls_time",
+                str(segment_duration),
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "vod",
+                "-hls_flags",
+                "independent_segments",
+                "-hls_segment_type",
+                "mpegts",
+                "-start_number",
+                str(base_segment_number),
+                "-hls_segment_filename",
+                str(output_dir / "seg_%06d.ts"),
+                batch_playlist_path,
+            ]
+
+            logger.debug(f"FFmpeg batch command: {' '.join(ffmpeg_cmd)}")
+
+            subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=max(120, num_segments * 10),
+            )
+
+            durations = self._parse_extinf(batch_playlist_path)
+            wall_duration = time.time() - start_time
+
+            results = self._collect_batch_results(
+                client_id,
+                device_id,
+                output_dir,
+                base_segment_number,
+                num_segments,
+                durations,
+                wall_duration / num_segments,
+            )
+
+            if results:
+                # Refresh the filesystem rolling playlist to the last produced segment.
+                last_number = results[-1][0]
+                self._update_playlist(
+                    client_id, device_id, last_number, f"seg_{last_number:06d}.ts"
+                )
+
+            logger.info(
+                f"Batch generated {len(results)} segments "
+                f"[{base_segment_number}..{base_segment_number + num_segments - 1}] "
+                f"for {device_id} (wall={wall_duration:.2f}s, "
+                f"{len(results) / wall_duration:.1f} seg/s, ts_offset={output_ts_offset:.3f}s)"
+            )
+            return results
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg batch failed: {e.stderr}")
+            raise RuntimeError(f"FFmpeg batch generation failed: {e.stderr}") from e
+
+        except subprocess.TimeoutExpired as e:
+            logger.error("FFmpeg batch timeout")
+            raise RuntimeError("FFmpeg batch timeout") from e
+
+        finally:
+            self._cleanup_temp_files([input_list_path, batch_playlist_path, *downloaded_gcs_frames])
+
+    def _collect_batch_results(
+        self,
+        client_id: str,
+        device_id: str,
+        output_dir: Path,
+        base_segment_number: int,
+        num_segments: int,
+        durations: list[float],
+        wall_per_segment: float,
+    ) -> list[tuple[int, float]]:
+        """Verify each produced segment, upload to GCS if needed, and record metrics."""
+        segment_duration = self.config.segment_duration_seconds
+        results: list[tuple[int, float]] = []
+        for i in range(num_segments):
+            segment_number = base_segment_number + i
+            segment_filename = f"seg_{segment_number:06d}.ts"
+            if not (output_dir / segment_filename).exists():
+                logger.warning(f"Batch segment missing after encode: {segment_filename}")
+                continue
+
+            if isinstance(self.storage, GcsStorageBackend):
+                self.storage.sync_local_to_gcs(
+                    client_id, device_id, "hls/segments", segment_filename
+                )
+
+            duration = durations[i] if i < len(durations) else float(segment_duration)
+            segments_generated_total.labels(device_id=device_id).inc()
+            ffmpeg_duration_histogram.labels(device_id=device_id).observe(wall_per_segment)
+            results.append((segment_number, duration))
+        return results
+
+    @staticmethod
+    def _cleanup_temp_files(paths: list[str | None]) -> None:
+        """Best-effort removal of temp files (input lists, batch playlists, GCS downloads)."""
+        for path in paths:
+            if not path:
+                continue
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _update_playlist(
         self,
         client_id: str,
