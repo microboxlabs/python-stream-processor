@@ -54,6 +54,14 @@ class DeviceState(BaseModel):
     device_id: str = Field(description="Device identifier")
     frame_count: int = Field(default=0, description="Accumulated frames since last segment")
     last_frame_time: datetime | None = Field(default=None, description="Last frame timestamp")
+    pending_first_frame_time: datetime | None = Field(
+        default=None,
+        description=(
+            "Capture timestamp of the first frame in the current pending batch. "
+            "Used as the playlist-store score so segments order by content time "
+            "(safe for parallel/out-of-order generation) rather than generation time."
+        ),
+    )
     last_segment_time: datetime | None = Field(
         default=None, description="Last segment generation time"
     )
@@ -80,6 +88,8 @@ class DeviceState(BaseModel):
 
     def add_frame(self, frame_path: str, timestamp: datetime) -> None:
         """Add a frame to pending frames."""
+        if not self.pending_frames:
+            self.pending_first_frame_time = timestamp
         self.pending_frames.append(frame_path)
         self.frame_count = len(self.pending_frames)
         self.last_frame_time = timestamp
@@ -88,6 +98,7 @@ class DeviceState(BaseModel):
         """Clear and return pending frames after segment generation."""
         frames = self.pending_frames.copy()
         self.pending_frames = []
+        self.pending_first_frame_time = None
         self.frame_count = 0
         self.current_segment_number += 1
         self.last_segment_time = datetime.now(UTC)

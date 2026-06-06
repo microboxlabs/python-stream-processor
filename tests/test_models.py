@@ -81,6 +81,32 @@ class TestDeviceState:
         assert len(state.pending_frames) == 0
         assert state.current_segment_number == 1
 
+    def test_pending_first_frame_time_tracks_batch_start(self):
+        """First-frame time is set on the first frame and held for the batch."""
+        state = DeviceState(client_id="c", device_id="d")
+        t0 = datetime.now(UTC)
+        t1 = t0 + timedelta(seconds=1)
+
+        assert state.pending_first_frame_time is None
+        state.add_frame("/f0.jpg", t0)
+        assert state.pending_first_frame_time == t0
+        # Later frames in the same batch must not move the batch-start time.
+        state.add_frame("/f1.jpg", t1)
+        assert state.pending_first_frame_time == t0
+
+    def test_pending_first_frame_time_resets_per_segment(self):
+        """Clearing resets the batch-start time so the next batch tracks fresh."""
+        state = DeviceState(client_id="c", device_id="d")
+        t0 = datetime.now(UTC)
+        t_next = t0 + timedelta(seconds=6)
+
+        state.add_frame("/f0.jpg", t0)
+        state.clear_pending_frames()
+        assert state.pending_first_frame_time is None
+
+        state.add_frame("/f6.jpg", t_next)
+        assert state.pending_first_frame_time == t_next
+
     def test_should_generate_segment_by_count(self):
         """Test segment generation trigger by frame count."""
         state = DeviceState(client_id="test-client", device_id="test-device")

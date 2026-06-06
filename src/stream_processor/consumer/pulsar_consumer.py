@@ -292,13 +292,27 @@ class StreamProcessorConsumer:
         return state.current_segment_number
 
     async def _add_segment_to_playlist(
-        self, client_id: str, device_id: str, segment_number: int
+        self,
+        client_id: str,
+        device_id: str,
+        segment_number: int,
+        timestamp: float | None = None,
     ) -> None:
-        """Add segment to playlist store in Redis for dynamic playlist generation."""
+        """Add segment to playlist store in Redis for dynamic playlist generation.
+
+        ``timestamp`` is the segment's first-frame capture time (epoch seconds),
+        used as the ZSET score so the playlist orders by content time — correct
+        even if segments are generated out of order (parallel catch-up). The
+        quarkus playlist reads this ordering and the cleanup service uses it for
+        time-based retention, so a content timestamp satisfies both. Falls back
+        to "now" when unavailable.
+        """
         if not (self.playlist_store and self.playlist_enabled):
             return
         try:
-            await self.playlist_store.add_segment(client_id, device_id, segment_number)
+            await self.playlist_store.add_segment(
+                client_id, device_id, segment_number, timestamp=timestamp
+            )
         except Exception as e:
             logger.warning(
                 f"Failed to add segment to playlist store "
@@ -315,6 +329,14 @@ class StreamProcessorConsumer:
         if not frames:
             logger.warning(f"No frames to process for {state_key}")
             return
+
+        # Capture the segment's content timestamp before clear_pending_frames()
+        # resets it; used as the playlist-store score (content-time ordering).
+        segment_score = (
+            state.pending_first_frame_time.timestamp()
+            if state.pending_first_frame_time is not None
+            else None
+        )
 
         segment_number = await self._next_segment_number(state)
 
@@ -350,7 +372,9 @@ class StreamProcessorConsumer:
                 if self.session_store:
                     await self.session_store.update_segment(client_id, device_id, segment_number)
 
-                await self._add_segment_to_playlist(client_id, device_id, segment_number)
+                await self._add_segment_to_playlist(
+                    client_id, device_id, segment_number, segment_score
+                )
             else:
                 logger.debug(f"Segment generation skipped for {state_key} (missing frames)")
 
