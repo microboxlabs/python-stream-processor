@@ -253,7 +253,15 @@ class StreamProcessorConsumer:
         """
         if not self.session_store:
             return
-        session_data = await self.session_store.update_activity(state.client_id, state.device_id)
+        # Pass the first pending frame's capture time (request timestamp — "when we
+        # received it"; falls back to its capture timestamp) so the recording's
+        # time range reflects when frames were captured, not when we processed them.
+        frame_time = (
+            state.pending_request_times[0] if state.pending_request_times else None
+        ) or state.pending_first_frame_time
+        session_data = await self.session_store.update_activity(
+            state.client_id, state.device_id, frame_time=frame_time
+        )
         if session_data is not None and session_data.session_id != state.current_session_id:
             if state.current_session_id is not None:
                 logger.info(

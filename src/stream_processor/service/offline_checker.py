@@ -149,6 +149,8 @@ class OfflineChecker:
             first_segment_number=session.first_segment_number,
             last_segment_number=session.last_segment_number,
             frame_count=session.frame_count,
+            captured_started_at=session.captured_started_dt,
+            captured_ended_at=session.captured_ended_dt,
         )
 
         # Create archive
@@ -231,6 +233,8 @@ class OfflineChecker:
             first_segment_number=session.first_segment_number,
             last_segment_number=session.last_segment_number,
             frame_count=session.frame_count,
+            captured_started_at=session.captured_started_dt,
+            captured_ended_at=session.captured_ended_dt,
         )
 
         # Archive first, then restart

@@ -24,11 +24,15 @@ class DeviceSession:
     client_id: str
     device_id: str
     session_id: str
-    started_at: datetime
-    last_frame_at: datetime
+    started_at: datetime  # WALL-CLOCK (offline detection, retention)
+    last_frame_at: datetime  # WALL-CLOCK (offline detection, retention)
     first_segment_number: int
     last_segment_number: int = 0
     frame_count: int = 0
+    # Capture-time bounds for the recording's displayed time range (fall back to
+    # wall-clock when unavailable).
+    captured_started_at: datetime | None = None
+    captured_ended_at: datetime | None = None
 
     @property
     def state_key(self) -> str:
@@ -37,8 +41,23 @@ class DeviceSession:
 
     @property
     def duration_seconds(self) -> int:
-        """Get the session duration in seconds."""
+        """Get the session duration in seconds (wall-clock)."""
         return int((self.last_frame_at - self.started_at).total_seconds())
+
+    @property
+    def display_started_at(self) -> datetime:
+        """Capture-time start for display (falls back to wall-clock)."""
+        return self.captured_started_at or self.started_at
+
+    @property
+    def display_ended_at(self) -> datetime:
+        """Capture-time end for display (falls back to wall-clock)."""
+        return self.captured_ended_at or self.last_frame_at
+
+    @property
+    def captured_duration_seconds(self) -> int:
+        """Real captured span in seconds (falls back to wall-clock duration)."""
+        return int((self.display_ended_at - self.display_started_at).total_seconds())
 
     @property
     def segment_count(self) -> int:

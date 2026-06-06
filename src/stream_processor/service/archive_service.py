@@ -333,6 +333,8 @@ class ArchiveService:
         """
         pool = await self._get_db_pool()
 
+        # Retention is anchored to WALL-CLOCK time (when archived), not capture
+        # time — otherwise a backlog archive of old footage would expire instantly.
         expires_at = session.last_frame_at + timedelta(days=self.config.retention_days)
 
         await pool.execute(
@@ -348,9 +350,11 @@ class ArchiveService:
             session.device_id,
             session.session_id,
             session.client_id,  # owner_client_id = client_id (device is directly connected)
-            session.started_at,
-            session.last_frame_at,
-            session.duration_seconds,
+            # Displayed time range uses CAPTURE time so backlog recordings show
+            # the real capture window, not the processing window.
+            session.display_started_at,
+            session.display_ended_at,
+            session.captured_duration_seconds,
             session.first_segment_number,
             session.last_segment_number,
             session.segment_count,
@@ -384,9 +388,9 @@ class ArchiveService:
                 session.device_id,
                 session.session_id,
                 session.client_id,  # owner_client_id = client_id (device is directly connected)
-                session.started_at,
-                session.last_frame_at,
-                session.duration_seconds,
+                session.display_started_at,
+                session.display_ended_at,
+                session.captured_duration_seconds,
                 session.first_segment_number,
                 session.last_segment_number,
                 session.segment_count,
@@ -410,13 +414,11 @@ class ArchiveService:
             return 0
 
         # Find expired archives
-        rows = await pool.fetch(
-            """
+        rows = await pool.fetch("""
             SELECT id, client_id, device_id, session_id, archive_path
             FROM deferred_transmissions
             WHERE status = 'ready' AND expires_at < CURRENT_TIMESTAMP
-            """
-        )
+            """)
 
         deleted_count = 0
 
