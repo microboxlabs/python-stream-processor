@@ -381,6 +381,10 @@ class StreamProcessorConsumer:
         except Exception as e:
             processing_errors_total.labels(device_id=state_key, error_type="ffmpeg").inc()
             logger.error(f"Failed to generate segment for {state_key}: {e}", exc_info=True)
+        finally:
+            # Remove watermarked temp frames now that FFmpeg has consumed them.
+            if self.watermark_service:
+                self.watermark_service.cleanup_temp_frames(frames)
 
     def _blocking_batch_receive(self) -> list[pulsar.Message]:
         """

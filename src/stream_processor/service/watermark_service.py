@@ -4,6 +4,7 @@ Watermark service for adding timestamp overlays to video frames.
 
 import asyncio
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -26,6 +27,25 @@ class WatermarkService:
             gcs_bucket=settings.storage.gcs_bucket,
             gcs_project_id=settings.storage.gcs_project_id,
         )
+        # Dedicated dir for watermarked GCS frames. We write the watermarked image
+        # to a local temp here and hand FFmpeg that path directly, instead of
+        # re-uploading to GCS and re-downloading in the encoder. The consumer
+        # deletes these after the segment is generated.
+        self.wm_dir = Path(tempfile.gettempdir()) / "stream_wm"
+        self.wm_dir.mkdir(parents=True, exist_ok=True)
+
+    def is_watermark_temp(self, path: str) -> bool:
+        """True if path is a watermarked temp this service produced (safe to delete)."""
+        return not path.startswith("gs://") and path.startswith(str(self.wm_dir))
+
+    def cleanup_temp_frames(self, paths: list[str]) -> None:
+        """Delete watermarked temp frames (no-op for originals / GCS URIs)."""
+        for path in paths:
+            if self.is_watermark_temp(path):
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def _get_font(self, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         """Get font for watermark text."""
@@ -162,50 +182,21 @@ class WatermarkService:
 
         # Open image with context manager to ensure proper cleanup
         with Image.open(frame_path) as image:
-            # Create drawing context
-            draw = ImageDraw.Draw(image, mode="RGBA")
-
-            # Get font
-            font = self._get_font(self.config.font_size)
-
-            # Format timestamp text
-            text = self._format_timestamp(timestamp)
-
-            # Get text bounding box
-            text_bbox = draw.textbbox((0, 0), text, font=font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_height = text_bbox[3] - text_bbox[1]
-
-            # Calculate position
-            x, y = self._get_position(image.width, image.height, text_bbox)
-
-            # Draw semi-transparent background
-            bg_padding = 5
-            bg_rect = [
-                x - bg_padding,
-                y - bg_padding,
-                x + text_width + bg_padding,
-                y + text_height + bg_padding,
-            ]
-            draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
-
-            # Draw white text
-            draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
-
-            # Save image
+            self._draw_watermark(image, timestamp)
             image.save(output_path, quality=95)
 
         return str(output_path)
 
     def _add_watermark_gcs(self, gcs_path: str, timestamp: datetime) -> str:
         """
-        Apply watermark to a GCS-stored frame.
+        Apply a watermark to a GCS-stored frame and return a LOCAL temp path.
 
-        Downloads the frame, applies watermark, uploads the watermarked bytes back
-        to the same GCS object (replacing the original), and returns the original
-        GCS URI. Downstream consumers (hls_generator) will pull the watermarked
-        content from GCS into a managed temp directory whose lifecycle is owned
-        by the segment generator.
+        Downloads the frame once, draws the timestamp, and writes the result to a
+        local temp file under ``self.wm_dir`` — it does NOT upload back to GCS.
+        FFmpeg then reads this local file directly, so each frame costs a single
+        GCS download instead of download + re-upload + re-download. The original
+        GCS object is left untouched. The consumer removes the temp via
+        :meth:`cleanup_temp_frames` once the segment is generated.
         """
         import re
 
@@ -228,78 +219,47 @@ class WatermarkService:
         if file_data is None:
             raise FileNotFoundError(f"Frame not found in storage: {gcs_path}")
 
-        # Initialize path variables for cleanup
         tmp_in_path: Path | None = None
-        tmp_out_path: Path | None = None
+        out_path = self.wm_dir / f"wm_{uuid.uuid4().hex}.jpg"
 
         try:
-            # Create temp input file for Pillow processing
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_in:
                 tmp_in.write(file_data)
                 tmp_in_path = Path(tmp_in.name)
 
-            # Create a temporary file for the watermarked output
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_out:
-                tmp_out_path = Path(tmp_out.name)
-
-            # Apply watermark to the temporary file
             with Image.open(tmp_in_path) as image:
-                # Create drawing context
-                draw = ImageDraw.Draw(image, mode="RGBA")
+                self._draw_watermark(image, timestamp)
+                image.save(out_path, quality=95)
 
-                # Get font
-                font = self._get_font(self.config.font_size)
-
-                # Format timestamp text
-                text = self._format_timestamp(timestamp)
-
-                # Get text bounding box
-                text_bbox = draw.textbbox((0, 0), text, font=font)
-                text_width = text_bbox[2] - text_bbox[0]
-                text_height = text_bbox[3] - text_bbox[1]
-
-                # Calculate position
-                x, y = self._get_position(image.width, image.height, text_bbox)
-
-                # Draw semi-transparent background
-                bg_padding = 5
-                bg_rect = [
-                    x - bg_padding,
-                    y - bg_padding,
-                    x + text_width + bg_padding,
-                    y + text_height + bg_padding,
-                ]
-                draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
-
-                # Draw white text
-                draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
-
-                # Save to temp output file
-                image.save(tmp_out_path, quality=95)
-
-            # Upload watermarked frame back to GCS (replacing original)
-            with open(tmp_out_path, "rb") as f:
-                watermarked_data = f.read()
-
-            self.storage.write_file(
-                client_id, device_id, subpath, watermarked_data, content_type="image/jpeg"
-            )
-            logger.debug(f"Watermarked frame uploaded to GCS: {gcs_path}")
-
-            # Return the original GCS URI — the object now contains the watermarked
-            # bytes, so downstream can treat it like any other GCS frame. Local temp
-            # files are cleaned in the finally block.
-            return gcs_path
+            logger.debug(f"Watermarked frame written locally: {out_path} (from {gcs_path})")
+            return str(out_path)
 
         finally:
-            # Always clean up both temp files to avoid leaking /tmp/*.jpg
+            # Clean up only the downloaded input; the watermarked output is the
+            # return value and is cleaned by the consumer after segment generation.
             if tmp_in_path and tmp_in_path.exists():
                 try:
                     tmp_in_path.unlink()
                 except OSError:
                     pass
-            if tmp_out_path and tmp_out_path.exists():
-                try:
-                    tmp_out_path.unlink()
-                except OSError:
-                    pass
+
+    def _draw_watermark(self, image: Image.Image, timestamp: datetime) -> None:
+        """Draw the timestamp overlay onto an open PIL image (in place)."""
+        draw = ImageDraw.Draw(image, mode="RGBA")
+        font = self._get_font(self.config.font_size)
+        text = self._format_timestamp(timestamp)
+
+        text_bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        x, y = self._get_position(image.width, image.height, text_bbox)
+
+        bg_padding = 5
+        bg_rect = [
+            x - bg_padding,
+            y - bg_padding,
+            x + text_width + bg_padding,
+            y + text_height + bg_padding,
+        ]
+        draw.rectangle(bg_rect, fill=(0, 0, 0, 204))  # 80% opacity black
+        draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
