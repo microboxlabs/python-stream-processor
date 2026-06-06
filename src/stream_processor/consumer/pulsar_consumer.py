@@ -217,7 +217,7 @@ class StreamProcessorConsumer:
 
         if isinstance(item, FrameEvent):
             try:
-                await self._accumulate_frame(state, item)
+                self._accumulate_frame(state, item)
             except Exception as e:
                 processing_errors_total.labels(
                     device_id=state.state_key, error_type="accumulate"
@@ -234,7 +234,7 @@ class StreamProcessorConsumer:
         except Exception as e:
             logger.error(f"Error flushing frames for {state.state_key} on shutdown: {e}")
 
-    async def _accumulate_frame(self, state: DeviceState, event: FrameEvent) -> None:
+    def _accumulate_frame(self, state: DeviceState, event: FrameEvent) -> None:
         """
         Append the raw frame + its request timestamp. Cheap on purpose:
         watermarking and the Redis session update are deferred to generation so

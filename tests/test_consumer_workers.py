@@ -223,9 +223,10 @@ class TestBatchReceive:
 class TestParallelWatermark:
     """Watermarking is deferred out of accumulation and run in parallel per segment."""
 
-    async def test_generate_segment_watermarks_in_parallel_and_cleans(self, monkeypatch):
+    async def test_generate_segment_watermarks_in_parallel_and_cleans(self, monkeypatch, tmp_path):
         from unittest.mock import AsyncMock
 
+        wm_root = str(tmp_path / "wm")
         gen_frames: list[list[str]] = []
 
         def gen(client_id, device_id, frames, segment_number, offset):
@@ -239,10 +240,10 @@ class TestParallelWatermark:
 
         def _wm(path, req):
             wm_calls.append((path, req))
-            return f"/tmp/stream_wm/wm_{path.rsplit('/', 1)[-1]}"
+            return f"{wm_root}/wm_{path.rsplit('/', 1)[-1]}"
 
         wm.add_timestamp_watermark = AsyncMock(side_effect=_wm)
-        wm.is_watermark_temp.side_effect = lambda p: p.startswith("/tmp/stream_wm/")
+        wm.is_watermark_temp.side_effect = lambda p: p.startswith(wm_root)
         cleaned: list[str] = []
         wm.cleanup_temp_frames.side_effect = cleaned.extend
         consumer.watermark_service = wm
@@ -265,7 +266,7 @@ class TestParallelWatermark:
 
         # Exactly one segment, encoded from the WATERMARKED paths.
         assert len(gen_frames) == 1
-        assert all(p.startswith("/tmp/stream_wm/") for p in gen_frames[0])
+        assert all(p.startswith(wm_root) for p in gen_frames[0])
         # One watermark call per frame (run concurrently via gather).
         assert len(wm_calls) == fps
         # Temps handed to cleanup after the segment.
