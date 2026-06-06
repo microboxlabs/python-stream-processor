@@ -501,6 +501,11 @@ class StreamProcessorConsumer:
                         self.io_executor, self._blocking_batch_receive
                     )
                     for msg in msgs:
+                        # Stop mid-batch on shutdown so we don't re-create workers
+                        # or block on a full queue after stop() has run. Undispatched
+                        # messages are unacked and redelivered by Pulsar.
+                        if not self.running:
+                            break
                         await self._dispatch(msg)
                 except Exception as e:
                     if self.running:
