@@ -5,8 +5,11 @@ frames are pushed onto a device's queue and the worker is drained via the same
 graceful-shutdown path used in production.
 """
 
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
+
+import pulsar
 
 import stream_processor.consumer.pulsar_consumer as pc
 from stream_processor.model.events import FrameEvent
@@ -148,3 +151,70 @@ class TestPerDeviceWorker:
         finally:
             _shutdown_executors(consumer)
             await fake_redis.flushall()
+
+
+def _pulsar_msg(client_id: str, device_id: str, idx: int):
+    """A fake Pulsar message whose .data() is a valid FrameEvent JSON."""
+    m = MagicMock()
+    m.data.return_value = json.dumps(
+        {
+            "eventId": f"e-{device_id}-{idx}",
+            "clientId": client_id,
+            "deviceId": device_id,
+            "timestamp": "2025-11-25T10:30:00Z",
+            "framePath": f"/frames/{device_id}/{idx}.jpg",
+            "requestId": f"r-{device_id}-{idx}",
+        }
+    ).encode()
+    return m
+
+
+class TestBatchReceive:
+    """The batched Pulsar intake path."""
+
+    def test_blocking_batch_receive_returns_list(self, monkeypatch):
+        """batch_receive results are returned as a plain list."""
+        consumer, _ = _make_consumer(monkeypatch, lambda *a: ("u", 1.0))
+        try:
+            m1, m2 = object(), object()
+            fake = MagicMock()
+            fake.batch_receive.return_value = [m1, m2]
+            consumer.consumer = fake
+            assert consumer._blocking_batch_receive() == [m1, m2]
+        finally:
+            _shutdown_executors(consumer)
+
+    def test_blocking_batch_receive_timeout_returns_empty(self, monkeypatch):
+        """A batch timeout yields an empty list, not an exception."""
+        consumer, _ = _make_consumer(monkeypatch, lambda *a: ("u", 1.0))
+        try:
+            fake = MagicMock()
+            fake.batch_receive.side_effect = pulsar.Timeout
+            consumer.consumer = fake
+            assert consumer._blocking_batch_receive() == []
+        finally:
+            _shutdown_executors(consumer)
+
+    async def test_dispatch_batch_routes_and_acks(self, monkeypatch):
+        """Each message in a batch is routed to its device worker and acked."""
+        calls: list[tuple] = []
+
+        def gen(client_id, device_id, frames, segment_number, offset):
+            calls.append((device_id, segment_number))
+            return (f"seg_{segment_number:06d}.ts", float(len(frames)))
+
+        consumer, _ = _make_consumer(monkeypatch, gen)
+        consumer.consumer = MagicMock()  # for acknowledge()
+        try:
+            fps = consumer.processing_config.frames_per_segment
+            # Interleave two devices, fps frames each — mimics a batch.
+            for i in range(fps):
+                await consumer._dispatch(_pulsar_msg("c", "a", i))
+                await consumer._dispatch(_pulsar_msg("c", "b", i))
+
+            await consumer._shutdown_workers()
+
+            assert consumer.consumer.acknowledge.call_count == fps * 2
+            assert {d for d, _ in calls} == {"a", "b"}
+        finally:
+            _shutdown_executors(consumer)

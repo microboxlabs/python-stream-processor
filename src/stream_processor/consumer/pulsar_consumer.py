@@ -358,13 +358,19 @@ class StreamProcessorConsumer:
             processing_errors_total.labels(device_id=state_key, error_type="ffmpeg").inc()
             logger.error(f"Failed to generate segment for {state_key}: {e}", exc_info=True)
 
-    def _blocking_receive(self) -> pulsar.Message | None:
-        """Blocking Pulsar receive, run on the dedicated io thread."""
+    def _blocking_batch_receive(self) -> list[pulsar.Message]:
+        """
+        Blocking batch receive, run on the dedicated io thread.
+
+        Returns up to receive_batch_size messages (fewer if the batch timeout
+        elapses first), or an empty list on timeout. Batching keeps consumer
+        intake from being capped at one receive round-trip per message.
+        """
         assert self.consumer is not None
         try:
-            return self.consumer.receive(timeout_millis=1000)
+            return list(self.consumer.batch_receive())
         except pulsar.Timeout:
-            return None
+            return []
 
     async def _dispatch(self, msg: pulsar.Message) -> None:
         """Parse a Pulsar message, route the frame to its device worker, and ack."""
@@ -420,6 +426,10 @@ class StreamProcessorConsumer:
         logger.info(f"Subscription: {self.config.subscription}")
         logger.info(f"Max Workers: {self.processing_config.max_workers}")
         logger.info(f"Device queue maxsize: {self.processing_config.device_queue_maxsize}")
+        logger.info(
+            f"Receive batch: size={self.processing_config.receive_batch_size} "
+            f"timeout_ms={self.processing_config.receive_batch_timeout_ms}"
+        )
         logger.info(f"Redis session tracking: {'enabled' if self.session_store else 'disabled'}")
         logger.info(f"Redis playlist store: {'enabled' if self.playlist_enabled else 'disabled'}")
         logger.info(
@@ -454,13 +464,23 @@ class StreamProcessorConsumer:
             )
             assert self.client is not None  # For type checker
 
+            # Pull messages in batches so intake isn't capped by one receive
+            # round-trip per message. The batch completes as soon as ANY of:
+            # batch_size messages, ~10MB, or batch_timeout_ms elapsed.
+            batch_policy = pulsar.ConsumerBatchReceivePolicy(
+                self.processing_config.receive_batch_size,
+                10 * 1024 * 1024,
+                self.processing_config.receive_batch_timeout_ms,
+            )
+
             # Create consumer with Key_Shared subscription
             self.consumer = self.client.subscribe(
                 self.config.topic,
                 subscription_name=self.config.subscription,
                 consumer_type=pulsar.ConsumerType.KeyShared,
                 consumer_name=self.config.consumer_name,
-                receiver_queue_size=1000,
+                receiver_queue_size=max(1000, self.processing_config.receive_batch_size * 2),
+                batch_receive_policy=batch_policy,
             )
 
             logger.info("Connected to Pulsar broker")
@@ -471,18 +491,20 @@ class StreamProcessorConsumer:
             # Start background metrics task
             metrics_task = asyncio.create_task(self._update_metrics_loop())
 
-            # Main receive loop: receive (off the event loop) -> dispatch -> ack.
-            # Segment generation happens in per-device workers, not here.
+            # Main receive loop: batch-receive (off the event loop) -> dispatch
+            # each in order -> ack. Segment generation happens in per-device
+            # workers, not here.
             loop = asyncio.get_event_loop()
             while self.running:
                 try:
-                    msg = await loop.run_in_executor(self.io_executor, self._blocking_receive)
-                    if msg is None:
-                        continue
-                    await self._dispatch(msg)
+                    msgs = await loop.run_in_executor(
+                        self.io_executor, self._blocking_batch_receive
+                    )
+                    for msg in msgs:
+                        await self._dispatch(msg)
                 except Exception as e:
                     if self.running:
-                        logger.error(f"Error receiving message: {e}")
+                        logger.error(f"Error receiving messages: {e}")
                         await asyncio.sleep(1)
 
             # Cancel background tasks
