@@ -9,6 +9,7 @@ Used by:
 """
 
 import time
+from typing import cast
 from urllib.parse import urlparse
 
 import redis.asyncio as redis
@@ -157,7 +158,7 @@ class RedisPlaylistStore:
             timestamp = time.time()
 
         # ZADD returns 1 if new member added, 0 if score updated
-        added: int = await client.zadd(key, {str(segment_number): timestamp})  # type: ignore[misc]
+        added = cast(int, await client.zadd(key, {str(segment_number): timestamp}))
 
         if added:
             logger.debug(
@@ -268,12 +269,13 @@ class RedisPlaylistStore:
             from_timestamp = to_timestamp - (settings.processing.retention_hours * 3600)
 
         # ZRANGEBYSCORE returns members with scores in range, with scores
-        results = await client.zrangebyscore(  # type: ignore[misc]
-            key, from_timestamp, to_timestamp, withscores=True
+        results = cast(
+            "list[tuple[str, float]]",
+            await client.zrangebyscore(key, from_timestamp, to_timestamp, withscores=True),
         )
 
         # Convert to list of (segment_number, timestamp) tuples
-        segments = [(int(member), score) for member, score in results]
+        segments = [(int(member), float(score)) for member, score in results]
 
         logger.debug(
             f"Retrieved {len(segments)} segments from playlist store: "

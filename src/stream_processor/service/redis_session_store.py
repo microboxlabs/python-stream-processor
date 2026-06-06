@@ -11,6 +11,7 @@ import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from typing import cast
 
 import redis.asyncio as redis
 from redis.exceptions import WatchError
@@ -156,7 +157,7 @@ class RedisSessionStore:
                 existing = await client.get(key)
 
                 if existing:
-                    session = SessionData.from_json(existing)
+                    session = SessionData.from_json(cast(str, existing))
 
                     # Validate session_id if provided (reject stale updates)
                     if (
@@ -251,7 +252,7 @@ class RedisSessionStore:
                     logger.warning(f"No active session for segment update: {state_key}")
                     return None
 
-                session = SessionData.from_json(existing)
+                session = SessionData.from_json(cast(str, existing))
 
                 # Validate session_id if provided (reject stale updates)
                 if expected_session_id is not None and session.session_id != expected_session_id:
@@ -301,7 +302,7 @@ class RedisSessionStore:
         data = await client.get(key)
 
         if data:
-            return SessionData.from_json(data)
+            return SessionData.from_json(cast(str, data))
         return None
 
     async def get_all_sessions(self) -> list[SessionData]:
@@ -311,7 +312,10 @@ class RedisSessionStore:
         sessions = []
 
         # Get all session keys from index
-        state_keys = await client.smembers(SESSION_INDEX_KEY)  # type: ignore[misc]
+        state_keys = cast(
+            "set[str]",
+            await client.smembers(SESSION_INDEX_KEY),  # type: ignore[misc]
+        )
 
         for state_key in state_keys:
             parts = state_key.split(":", 1)
@@ -385,7 +389,7 @@ class RedisSessionStore:
                 if expected_session_id is not None:
                     existing = await client.get(key)
                     if existing:
-                        current_session = SessionData.from_json(existing)
+                        current_session = SessionData.from_json(cast(str, existing))
                         if current_session.session_id != expected_session_id:
                             await client.unwatch()
                             logger.info(
