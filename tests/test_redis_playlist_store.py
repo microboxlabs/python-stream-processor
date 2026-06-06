@@ -2,8 +2,6 @@
 
 import time
 
-import pytest
-
 
 class TestRedisPlaylistStoreAddSegment:
     """Tests for add_segment method."""
@@ -52,9 +50,7 @@ class TestRedisPlaylistStoreAddSegment:
         assert segment_num == 100
         assert before <= timestamp <= after
 
-    async def test_add_multiple_segments(
-        self, playlist_store, sample_client_id, sample_device_id
-    ):
+    async def test_add_multiple_segments(self, playlist_store, sample_client_id, sample_device_id):
         """Test adding multiple segments."""
         await playlist_store.add_segment(
             sample_client_id, sample_device_id, segment_number=100, timestamp=1705574400
@@ -387,9 +383,7 @@ class TestRedisPlaylistStoreDeletePlaylist:
 class TestRedisPlaylistStoreMultipleDevices:
     """Tests for multiple devices/clients."""
 
-    async def test_segments_isolated_between_devices(
-        self, playlist_store, sample_client_id
-    ):
+    async def test_segments_isolated_between_devices(self, playlist_store, sample_client_id):
         """Test that segments are isolated between different devices."""
         device1 = "device-001"
         device2 = "device-002"
@@ -424,9 +418,7 @@ class TestRedisPlaylistStoreMultipleDevices:
         assert segments1[0][0] == 100
         assert segments2[0][0] == 200
 
-    async def test_segments_isolated_between_clients(
-        self, playlist_store, sample_device_id
-    ):
+    async def test_segments_isolated_between_clients(self, playlist_store, sample_device_id):
         """Test that segments are isolated between different clients."""
         client1 = "client-001"
         client2 = "client-002"
@@ -466,6 +458,75 @@ class TestRedisPlaylistStoreMultipleDevices:
         # Verify device1 is empty but device2 is intact
         assert await playlist_store.get_segment_count(sample_client_id, device1) == 0
         assert await playlist_store.get_segment_count(sample_client_id, device2) == 1
+
+
+class TestRedisPlaylistStoreSegmentCounter:
+    """Tests for the atomic per-device segment counter."""
+
+    async def test_seed_then_next_returns_first_number(
+        self, playlist_store, sample_client_id, sample_device_id
+    ):
+        """First allocation after seeding returns exactly the seeded first number."""
+        await playlist_store.seed_segment_counter(sample_client_id, sample_device_id, 100)
+
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 100
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 101
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 102
+
+    async def test_seed_from_zero(self, playlist_store, sample_client_id, sample_device_id):
+        """A brand-new device seeded at 0 starts numbering at 0."""
+        await playlist_store.seed_segment_counter(sample_client_id, sample_device_id, 0)
+
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 0
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 1
+
+    async def test_seed_is_idempotent(self, playlist_store, sample_client_id, sample_device_id):
+        """Re-seeding (e.g. a second pod) never rewinds an existing counter."""
+        await playlist_store.seed_segment_counter(sample_client_id, sample_device_id, 100)
+        await playlist_store.next_segment_number(sample_client_id, sample_device_id)  # -> 100
+
+        # A second pod seeds with a stale value; SET NX must leave the counter alone.
+        await playlist_store.seed_segment_counter(sample_client_id, sample_device_id, 100)
+
+        # Continues from where it was, not from the re-seeded value.
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 101
+
+    async def test_next_without_seed_starts_at_one(
+        self, playlist_store, sample_client_id, sample_device_id
+    ):
+        """INCR on a missing key starts at 1 (counter used without seeding)."""
+        assert await playlist_store.next_segment_number(sample_client_id, sample_device_id) == 1
+
+    async def test_counter_isolated_between_devices(self, playlist_store, sample_client_id):
+        """Each device has an independent counter."""
+        await playlist_store.seed_segment_counter(sample_client_id, "device-a", 10)
+        await playlist_store.seed_segment_counter(sample_client_id, "device-b", 500)
+
+        assert await playlist_store.next_segment_number(sample_client_id, "device-a") == 10
+        assert await playlist_store.next_segment_number(sample_client_id, "device-b") == 500
+        assert await playlist_store.next_segment_number(sample_client_id, "device-a") == 11
+
+    async def test_delete_segment_counter(self, playlist_store, sample_client_id, sample_device_id):
+        """Deleting the counter resets numbering on next use."""
+        await playlist_store.seed_segment_counter(sample_client_id, sample_device_id, 100)
+        await playlist_store.next_segment_number(sample_client_id, sample_device_id)
+
+        assert (
+            await playlist_store.delete_segment_counter(sample_client_id, sample_device_id) is True
+        )
+        # Deleting a missing counter returns False.
+        assert (
+            await playlist_store.delete_segment_counter(sample_client_id, sample_device_id) is False
+        )
+
+    async def test_seq_key_format(
+        self, playlist_store, fake_redis, sample_client_id, sample_device_id
+    ):
+        """The counter Redis key uses the expected hls:seq: prefix."""
+        await playlist_store.seed_segment_counter(sample_client_id, sample_device_id, 5)
+
+        expected_key = f"hls:seq:{sample_client_id}:{sample_device_id}"
+        assert await fake_redis.exists(expected_key) == 1
 
 
 class TestRedisPlaylistStoreKeyFormat:

@@ -31,15 +31,24 @@ This service consumes frame events from Apache Pulsar and generates HLS (HTTP Li
 │                          │                                       │
 │                          ▼                                       │
 │  ┌────────────────────────────────────────────────────────────┐ │
-│  │  Frame Accumulator (per device)                            │ │
-│  │  - Collects frames until segment threshold                 │ │
-│  │  - Triggers segment generation every 30s or N frames       │ │
+│  │  Receive loop (decoupled from generation)                  │ │
+│  │  - Parses each frame, routes it to its device queue, acks  │ │
+│  │  - Blocking receive() runs on a dedicated IO thread        │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                          │                                       │
+│                          ▼                                       │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │  Per-device workers (one asyncio task per device)          │ │
+│  │  - Drain a bounded per-device queue (backpressure)         │ │
+│  │  - Accumulate frames; trigger on N frames or time          │ │
+│  │  - Submit FFmpeg jobs to the worker pool                   │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                          │                                       │
 │                          ▼                                       │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │  FFmpeg Worker Pool (ThreadPoolExecutor)                   │ │
 │  │  - MAX_WORKERS concurrent FFmpeg processes                 │ │
+│  │  - Different devices encode in parallel; per device serial │ │
 │  │  - Generates HLS segments (.ts) + playlist (.m3u8)         │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                          │                                       │
@@ -237,6 +246,35 @@ The service scales horizontally via Pulsar's **Key_Shared** subscription:
 
 Deploy multiple instances (K8s replicas) and Pulsar will distribute devices across them while maintaining ordering per device.
 
+### Concurrency model
+
+Within a single pod, consumption is decoupled from segment generation. The receive
+loop only parses each frame and hands it to a **per-device worker** (one `asyncio`
+task per device) via a bounded queue, then acks. Each worker generates its own
+device's segments **serially** (preserving order and the per-session PTS timeline),
+but workers for **different devices run concurrently**, bounded by
+`PROCESSING_MAX_WORKERS` FFmpeg threads. FFmpeg is CPU-bound, so set `MAX_WORKERS`
+near the pod's vCPU count and scale **pods** for more total throughput.
+
+The bounded per-device queue (`PROCESSING_DEVICE_QUEUE_MAXSIZE`) provides
+end-to-end backpressure: when a device's queue fills, the receive loop stops
+pulling from Pulsar (which stops the broker delivering) instead of buffering
+frames unbounded in memory.
+
+### Segment numbering across pods
+
+Key_Shared pins each device to a single pod, so per-device segment numbering is
+safe by design. On device handoff (pod scale up/down or restart) the new pod
+resumes numbering from the highest `.ts` in storage. To also close the brief
+rebalance window where two pods may momentarily touch the same device, enable
+`REDIS_SEGMENT_COUNTER_ENABLED=true`: segment numbers are then allocated via an
+atomic Redis `INCR` per device, so they can never collide or overwrite — strongly
+recommended when running more than one pod.
+
+> **Prerequisite:** the publisher must set the Pulsar message **key** to the
+> device (so Key_Shared keeps each device on one consumer). Without a key,
+> multiple pods will process the same device and break ordering and numbering.
+
 ## HLS Output
 
 Generated HLS streams are compatible with all major browsers:
@@ -381,6 +419,7 @@ Prometheus metrics available at `http://localhost:9090/metrics`:
 - `stream_processor_frames_received_total` - Total frames received
 - `stream_processor_segments_generated_total` - Total HLS segments generated
 - `stream_processor_active_devices` - Currently active devices
+- `stream_processor_queued_frames` - Frames buffered across per-device queues awaiting generation (backlog signal)
 - `stream_processor_ffmpeg_duration_seconds` - FFmpeg processing time histogram
 
 ## License

@@ -9,6 +9,7 @@ Used by:
 """
 
 import time
+from typing import cast
 from urllib.parse import urlparse
 
 import redis.asyncio as redis
@@ -20,6 +21,9 @@ logger = get_logger(__name__)
 
 # Redis key prefix for segment metadata
 SEGMENTS_KEY_PREFIX = "hls:segments:"
+
+# Redis key prefix for the per-device atomic segment-number counter
+SEQ_KEY_PREFIX = "hls:seq:"
 
 
 class RedisPlaylistStore:
@@ -73,6 +77,59 @@ class RedisPlaylistStore:
         """Get Redis key for segment metadata."""
         return f"{SEGMENTS_KEY_PREFIX}{client_id}:{device_id}"
 
+    def _seq_key(self, client_id: str, device_id: str) -> str:
+        """Get Redis key for the device's segment-number counter."""
+        return f"{SEQ_KEY_PREFIX}{client_id}:{device_id}"
+
+    async def seed_segment_counter(self, client_id: str, device_id: str, first_number: int) -> None:
+        """
+        Seed the per-device segment counter exactly once.
+
+        Stores ``first_number - 1`` so the first :meth:`next_segment_number`
+        call returns ``first_number``. Uses SET NX so it is idempotent and
+        race-free across pods: the first pod to seed wins; any later pod (or a
+        restart) leaves the existing counter untouched and simply continues
+        incrementing from wherever it is.
+
+        Args:
+            client_id: Client identifier
+            device_id: Device identifier
+            first_number: The first segment number this device should use
+                (typically ``highest_existing_segment + 1``, or 0 for a new device).
+        """
+        client = await self.connect()
+        key = self._seq_key(client_id, device_id)
+        # nx=True: only set if the counter does not already exist.
+        await client.set(key, first_number - 1, nx=True)
+
+    async def next_segment_number(self, client_id: str, device_id: str) -> int:
+        """
+        Atomically allocate the next segment number for a device.
+
+        Backed by Redis INCR, so even if two pods briefly process the same
+        device during a Key_Shared rebalance they receive distinct, monotonic
+        numbers — never a collision or an overwritten ``.ts``.
+
+        Returns:
+            The newly allocated segment number.
+        """
+        client = await self.connect()
+        key = self._seq_key(client_id, device_id)
+        value: int = await client.incr(key)  # type: ignore[misc]
+        return value
+
+    async def delete_segment_counter(self, client_id: str, device_id: str) -> bool:
+        """
+        Delete the per-device segment counter (used by device reset).
+
+        Returns:
+            True if the counter existed and was deleted.
+        """
+        client = await self.connect()
+        key = self._seq_key(client_id, device_id)
+        deleted: int = await client.delete(key)
+        return deleted > 0
+
     async def add_segment(
         self,
         client_id: str,
@@ -101,7 +158,7 @@ class RedisPlaylistStore:
             timestamp = time.time()
 
         # ZADD returns 1 if new member added, 0 if score updated
-        added: int = await client.zadd(key, {str(segment_number): timestamp})  # type: ignore[misc]
+        added = cast(int, await client.zadd(key, {str(segment_number): timestamp}))
 
         if added:
             logger.debug(
@@ -212,12 +269,13 @@ class RedisPlaylistStore:
             from_timestamp = to_timestamp - (settings.processing.retention_hours * 3600)
 
         # ZRANGEBYSCORE returns members with scores in range, with scores
-        results = await client.zrangebyscore(  # type: ignore[misc]
-            key, from_timestamp, to_timestamp, withscores=True
+        results = cast(
+            "list[tuple[str, float]]",
+            await client.zrangebyscore(key, from_timestamp, to_timestamp, withscores=True),
         )
 
         # Convert to list of (segment_number, timestamp) tuples
-        segments = [(int(member), score) for member, score in results]
+        segments = [(int(member), float(score)) for member, score in results]
 
         logger.debug(
             f"Retrieved {len(segments)} segments from playlist store: "

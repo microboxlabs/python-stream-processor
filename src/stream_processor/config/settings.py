@@ -57,6 +57,21 @@ class ProcessingConfig(BaseSettings):
     segment_duration_seconds: int = Field(default=6, description="HLS segment duration (playback)")
     frames_per_segment: int = Field(default=6, description="Frames per segment")
     retention_hours: int = Field(default=24, description="Hours of video to retain")
+    device_queue_maxsize: int = Field(
+        default=256,
+        description=(
+            "Max frames buffered per device before the receive loop blocks. "
+            "Provides end-to-end backpressure: when a device's queue is full the "
+            "consumer stops pulling from Pulsar instead of growing memory unbounded."
+        ),
+    )
+    segment_timer_interval_seconds: int = Field(
+        default=10,
+        description=(
+            "How often an idle device worker wakes to flush a time-based segment "
+            "when frames arrive sporadically (no new frame for max_segment_wait_seconds)."
+        ),
+    )
     frame_interval_seconds: int = Field(
         default=1, description="Display duration per frame in output video"
     )
@@ -80,6 +95,16 @@ class RedisConfig(BaseSettings):
     playlist_enabled: bool = Field(
         default=False,
         description="Enable Redis-based playlist metadata (requires enabled=True)",
+    )
+    segment_counter_enabled: bool = Field(
+        default=False,
+        description=(
+            "Use an atomic Redis INCR per device to allocate segment numbers "
+            "(requires enabled=True). Makes segment numbering safe across multiple "
+            "pods, including the brief Key_Shared rebalance window where two pods "
+            "may momentarily touch the same device. When disabled, numbering is "
+            "in-memory and seeded from storage on startup."
+        ),
     )
 
 
