@@ -176,10 +176,6 @@ class StreamProcessorConsumer:
         other device workers keep running on the event loop, so generation is
         concurrent across devices (bounded by the FFmpeg thread pool).
         """
-        frames_per_segment = self.processing_config.frames_per_segment
-        max_wait = self.processing_config.max_segment_wait_seconds
-        interval = self.processing_config.segment_timer_interval_seconds
-
         try:
             state = await self._init_device_state(client_id, device_id)
         except Exception as e:
@@ -189,40 +185,53 @@ class StreamProcessorConsumer:
             self.device_workers.pop(state_key, None)
             return
 
-        shutting_down = False
-        try:
-            while not shutting_down:
-                # Wait for a frame, but wake periodically to flush time-based
-                # segments when frames arrive sporadically.
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=interval)
-                except TimeoutError:
-                    item = None
-                else:
-                    if item is self._SHUTDOWN:
-                        shutting_down = True
-                    elif isinstance(item, FrameEvent):
-                        try:
-                            await self._accumulate_frame(state, item)
-                        except Exception as e:
-                            processing_errors_total.labels(
-                                device_id=state_key, error_type="accumulate"
-                            ).inc()
-                            logger.error(
-                                f"Error accumulating frame for {state_key}: {e}", exc_info=True
-                            )
+        frames_per_segment = self.processing_config.frames_per_segment
+        max_wait = self.processing_config.max_segment_wait_seconds
+        interval = self.processing_config.segment_timer_interval_seconds
 
+        try:
+            shutting_down = False
+            while not shutting_down:
+                shutting_down = await self._consume_one(state, queue, interval)
                 if state.should_generate_segment(frames_per_segment, max_wait_seconds=max_wait):
                     await self._generate_segment(state)
-        except asyncio.CancelledError:
-            raise
         finally:
             # Flush remaining frames so a graceful stop doesn't drop a partial segment.
-            if state.pending_frames:
-                try:
-                    await self._generate_segment(state)
-                except Exception as e:
-                    logger.error(f"Error flushing frames for {state_key} on shutdown: {e}")
+            await self._flush_pending_frames(state)
+
+    async def _consume_one(self, state: DeviceState, queue: asyncio.Queue, interval: int) -> bool:
+        """
+        Pull one queued item (or time out) and fold it into the device state.
+
+        Waking on the timeout lets time-based segments flush when frames arrive
+        sporadically. Returns True when the shutdown sentinel is received.
+        """
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=interval)
+        except TimeoutError:
+            return False
+
+        if item is self._SHUTDOWN:
+            return True
+
+        if isinstance(item, FrameEvent):
+            try:
+                await self._accumulate_frame(state, item)
+            except Exception as e:
+                processing_errors_total.labels(
+                    device_id=state.state_key, error_type="accumulate"
+                ).inc()
+                logger.error(f"Error accumulating frame for {state.state_key}: {e}", exc_info=True)
+        return False
+
+    async def _flush_pending_frames(self, state: DeviceState) -> None:
+        """Generate a final segment from any leftover frames (used on shutdown)."""
+        if not state.pending_frames:
+            return
+        try:
+            await self._generate_segment(state)
+        except Exception as e:
+            logger.error(f"Error flushing frames for {state.state_key} on shutdown: {e}")
 
     async def _accumulate_frame(self, state: DeviceState, event: FrameEvent) -> None:
         """Apply optional watermark, append the frame, and update session activity."""
@@ -496,13 +505,17 @@ class StreamProcessorConsumer:
 
         logger.info(f"Draining {len(self.device_workers)} device worker(s)...")
 
+        # Snapshot before awaiting: a worker may still be created/removed on the
+        # event loop while we await the puts below.
+        queues = list(self.device_queues.values())
+        workers = list(self.device_workers.items())
+
         # Workers keep draining the event loop, so these puts succeed even on
         # bounded queues. The sentinel is the last item enqueued (the receive
         # loop has already stopped), so all real frames are processed first.
-        for queue in list(self.device_queues.values()):
+        for queue in queues:
             await queue.put(self._SHUTDOWN)
 
-        workers = list(self.device_workers.items())
         results = await asyncio.gather(*(task for _, task in workers), return_exceptions=True)
         for (state_key, _), result in zip(workers, results, strict=False):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
