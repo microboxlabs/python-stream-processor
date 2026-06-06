@@ -218,3 +218,87 @@ class TestBatchReceive:
             assert {d for d, _ in calls} == {"a", "b"}
         finally:
             _shutdown_executors(consumer)
+
+
+class TestParallelWatermark:
+    """Watermarking is deferred out of accumulation and run in parallel per segment."""
+
+    async def test_generate_segment_watermarks_in_parallel_and_cleans(self, monkeypatch, tmp_path):
+        from unittest.mock import AsyncMock
+
+        wm_root = str(tmp_path / "wm")
+        gen_frames: list[list[str]] = []
+
+        def gen(client_id, device_id, frames, segment_number, offset):
+            gen_frames.append(list(frames))
+            return ("uri", float(len(frames)))
+
+        consumer, _ = _make_consumer(monkeypatch, gen)
+
+        wm = MagicMock()
+        wm_calls: list[tuple] = []
+
+        def _wm(path, req):
+            wm_calls.append((path, req))
+            return f"{wm_root}/wm_{path.rsplit('/', 1)[-1]}"
+
+        wm.add_timestamp_watermark = AsyncMock(side_effect=_wm)
+        wm.is_watermark_temp.side_effect = lambda p: p.startswith(wm_root)
+        cleaned: list[str] = []
+        wm.cleanup_temp_frames.side_effect = cleaned.extend
+        consumer.watermark_service = wm
+
+        fps = consumer.processing_config.frames_per_segment
+        queue = consumer._get_or_create_worker("c:d", "c", "d")
+        for i in range(fps):
+            ev = FrameEvent(
+                eventId=f"e{i}",
+                clientId="c",
+                deviceId="d",
+                timestamp=datetime.now(UTC),
+                requestTimestamp=1_700_000_000 + i,
+                framePath=f"/frames/d/{i}.jpg",
+                requestId=f"r{i}",
+            )
+            await queue.put(ev)
+
+        await consumer._shutdown_workers()
+
+        # Exactly one segment, encoded from the WATERMARKED paths.
+        assert len(gen_frames) == 1
+        assert all(p.startswith(wm_root) for p in gen_frames[0])
+        # One watermark call per frame (run concurrently via gather).
+        assert len(wm_calls) == fps
+        # Temps handed to cleanup after the segment.
+        assert len(cleaned) == fps
+        _shutdown_executors(consumer)
+
+    async def test_frames_without_request_time_are_not_watermarked(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        gen_frames: list[list[str]] = []
+
+        def gen(client_id, device_id, frames, segment_number, offset):
+            gen_frames.append(list(frames))
+            return ("uri", float(len(frames)))
+
+        consumer, _ = _make_consumer(monkeypatch, gen)
+        wm = MagicMock()
+        wm.add_timestamp_watermark = AsyncMock(side_effect=AssertionError("should not watermark"))
+        wm.is_watermark_temp.side_effect = lambda p: False
+        wm.cleanup_temp_frames.side_effect = lambda paths: None
+        consumer.watermark_service = wm
+
+        fps = consumer.processing_config.frames_per_segment
+        queue = consumer._get_or_create_worker("c:d", "c", "d")
+        for i in range(fps):
+            # No requestTimestamp -> no watermark for that frame.
+            await queue.put(_make_event("c", "d", i))
+
+        await consumer._shutdown_workers()
+
+        assert len(gen_frames) == 1
+        # Raw frame paths passed straight through (no watermark applied).
+        assert gen_frames[0] == [f"/frames/d/{i}.jpg" for i in range(fps)]
+        wm.add_timestamp_watermark.assert_not_called()
+        _shutdown_executors(consumer)

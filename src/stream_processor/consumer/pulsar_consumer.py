@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import pulsar
 
@@ -216,7 +217,7 @@ class StreamProcessorConsumer:
 
         if isinstance(item, FrameEvent):
             try:
-                await self._accumulate_frame(state, item)
+                self._accumulate_frame(state, item)
             except Exception as e:
                 processing_errors_total.labels(
                     device_id=state.state_key, error_type="accumulate"
@@ -233,44 +234,63 @@ class StreamProcessorConsumer:
         except Exception as e:
             logger.error(f"Error flushing frames for {state.state_key} on shutdown: {e}")
 
-    async def _accumulate_frame(self, state: DeviceState, event: FrameEvent) -> None:
-        """Apply optional watermark, append the frame, and update session activity."""
-        # Apply watermark if enabled
-        frame_path = event.frame_path
-        if self.watermark_service and event.request_timestamp:
-            try:
-                frame_path = await self.watermark_service.add_timestamp_watermark(
-                    event.frame_path, event.request_timestamp
-                )
-                logger.debug(f"Watermark applied to {frame_path}")
-            except Exception as e:
-                logger.error(f"Failed to apply watermark to {event.frame_path}: {e}")
-                # Continue with original frame path if watermarking fails
-                frame_path = event.frame_path
-
-        state.add_frame(frame_path, event.timestamp)
+    def _accumulate_frame(self, state: DeviceState, event: FrameEvent) -> None:
+        """
+        Append the raw frame + its request timestamp. Cheap on purpose:
+        watermarking and the Redis session update are deferred to generation so
+        accumulation never blocks on per-frame I/O, and the watermark can run in
+        parallel across a segment's frames.
+        """
+        state.add_frame(event.frame_path, event.timestamp, event.request_timestamp)
         frames_received_total.labels(device_id=state.state_key).inc()
 
-        # Update session activity in Redis (for offline-checker service).
-        # The returned SessionData lets us detect a session boundary and reset
-        # the per-session cumulative PTS offset so each archive starts at PTS=0
-        # and stays continuous within the session.
-        if self.session_store:
-            session_data = await self.session_store.update_activity(
-                state.client_id, state.device_id
-            )
-            if session_data is not None and session_data.session_id != state.current_session_id:
-                if state.current_session_id is not None:
-                    logger.info(
-                        f"Session boundary for {state.state_key}: "
-                        f"{state.current_session_id} -> {session_data.session_id}; "
-                        f"resetting PTS offset"
-                    )
-                state.reset_for_session(session_data.session_id)
+    async def _update_session(self, state: DeviceState) -> None:
+        """
+        Refresh session activity in Redis and reset the PTS offset on a session
+        boundary. Called once per generation (not per frame) to keep
+        accumulation cheap; the returned SessionData detects a new session so
+        each archive starts at PTS=0 and stays continuous within the session.
+        """
+        if not self.session_store:
+            return
+        session_data = await self.session_store.update_activity(state.client_id, state.device_id)
+        if session_data is not None and session_data.session_id != state.current_session_id:
+            if state.current_session_id is not None:
+                logger.info(
+                    f"Session boundary for {state.state_key}: "
+                    f"{state.current_session_id} -> {session_data.session_id}; "
+                    f"resetting PTS offset"
+                )
+            state.reset_for_session(session_data.session_id)
 
-        logger.debug(
-            f"Frame received for {state.state_key}: {frame_path} (pending: {state.frame_count})"
+    async def _watermark_frames(
+        self, frames: list[str], request_times: list[datetime | None]
+    ) -> tuple[list[str], list[str]]:
+        """
+        Watermark a segment's frames in parallel, returning
+        (paths_for_ffmpeg, temp_paths_to_clean). Each frame is watermarked in
+        its own thread concurrently and FFmpeg reads the local result directly.
+        Frames with no request timestamp (or if watermarking is off/fails) pass
+        through unchanged.
+        """
+        wm = self.watermark_service
+        if wm is None:
+            return list(frames), []
+
+        async def one(path: str, req: datetime | None) -> str:
+            if req is None:
+                return path
+            try:
+                return await wm.add_timestamp_watermark(path, req)
+            except Exception as e:
+                logger.error(f"Failed to watermark {path}: {e}")
+                return path
+
+        paths = list(
+            await asyncio.gather(*(one(p, r) for p, r in zip(frames, request_times, strict=False)))
         )
+        temps = [p for p in paths if wm.is_watermark_temp(p)]
+        return paths, temps
 
     async def _next_segment_number(self, state: DeviceState) -> int:
         """
@@ -320,38 +340,43 @@ class StreamProcessorConsumer:
             )
 
     async def _generate_segment(self, state: DeviceState) -> None:
-        """Generate HLS segment from accumulated frames."""
+        """Parallel-watermark the pending frames, then encode one HLS segment."""
         client_id = state.client_id
         device_id = state.device_id
         state_key = state.state_key
         frames = state.pending_frames.copy()
+        request_times = state.pending_request_times.copy()
 
         if not frames:
             logger.warning(f"No frames to process for {state_key}")
             return
 
-        # Capture the segment's content timestamp before clear_pending_frames()
-        # resets it; used as the playlist-store score (content-time ordering).
+        # Content timestamp for playlist ordering (first frame's capture time).
         segment_score = (
             state.pending_first_frame_time.timestamp()
             if state.pending_first_frame_time is not None
             else None
         )
 
-        segment_number = await self._next_segment_number(state)
+        # Refresh session first — a session boundary resets the PTS offset, which
+        # we snapshot below for this segment.
+        await self._update_session(state)
 
+        segment_number = await self._next_segment_number(state)
         logger.info(f"Generating segment {segment_number} for {state_key} ({len(frames)} frames)")
 
+        # Watermark this segment's frames in parallel (off the per-frame accumulate
+        # path), then FFmpeg reads the local watermarked files directly.
+        wm_paths, wm_temps = await self._watermark_frames(frames, request_times)
+
         try:
-            # Run FFmpeg in thread pool. Pass the per-session cumulative offset
-            # so the generated segment's PTS continues the timeline.
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 self.executor,
                 self.hls_generator.generate_segment,
                 client_id,
                 device_id,
-                frames,
+                wm_paths,
                 segment_number,
                 state.cumulative_segment_seconds,
             )
@@ -382,9 +407,9 @@ class StreamProcessorConsumer:
             processing_errors_total.labels(device_id=state_key, error_type="ffmpeg").inc()
             logger.error(f"Failed to generate segment for {state_key}: {e}", exc_info=True)
         finally:
-            # Remove watermarked temp frames now that FFmpeg has consumed them.
+            # Remove watermarked temp files now that FFmpeg has consumed them.
             if self.watermark_service:
-                self.watermark_service.cleanup_temp_frames(frames)
+                self.watermark_service.cleanup_temp_frames(wm_temps)
 
     def _blocking_batch_receive(self) -> list[pulsar.Message]:
         """
