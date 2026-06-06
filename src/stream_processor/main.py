@@ -10,6 +10,7 @@ Main entry points for the stream processor services:
 
 import argparse
 import asyncio
+import os
 import signal
 import sys
 
@@ -169,9 +170,22 @@ def run_consumer(use_redis: bool = True) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    shutdown_state = {"count": 0}
+
     def shutdown_handler(sig: signal.Signals) -> None:
-        logger.info(f"Received {sig.name}, initiating shutdown...")
-        loop.create_task(consumer.stop())
+        # First signal: request a single graceful shutdown by flipping the run
+        # loop's flag — run()'s own finally calls stop() exactly once. Do NOT
+        # spawn stop() here: a concurrent stop() races the still-running receive
+        # loop (which would re-create workers) and never converges.
+        shutdown_state["count"] += 1
+        if shutdown_state["count"] == 1:
+            logger.info(
+                f"Received {sig.name}, shutting down gracefully (press Ctrl-C again to force)..."
+            )
+            consumer.running = False
+        else:
+            logger.warning(f"Received {sig.name} again — forcing immediate exit")
+            os._exit(130)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown_handler, sig)
