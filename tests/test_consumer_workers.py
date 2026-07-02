@@ -7,7 +7,7 @@ graceful-shutdown path used in production.
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pulsar
 
@@ -93,9 +93,44 @@ class TestPerDeviceWorker:
 
             await consumer._shutdown_workers()
 
-            assert len(consumer.device_states) == 2
+            # Workers deregister their state on exit so a stale registry can
+            # never accumulate across worker restarts.
+            assert len(consumer.device_states) == 0
             by_device = dict(calls)
             assert by_device == {"a": 0, "b": 0}
+        finally:
+            _shutdown_executors(consumer)
+
+    async def test_session_store_failure_does_not_block_generation(self, monkeypatch):
+        """A dead session store (e.g. Redis outage) must not abort generation.
+
+        If the session refresh aborted the segment, pending frames would stay
+        pinned and grow unbounded for as long as the outage lasts.
+        """
+        calls: list[tuple] = []
+
+        def gen(client_id, device_id, frames, segment_number, offset):
+            calls.append((device_id, list(frames), segment_number))
+            return (f"seg_{segment_number:06d}.ts", float(len(frames)))
+
+        consumer, _ = _make_consumer(monkeypatch, gen)
+        consumer.session_store = MagicMock()
+        consumer.session_store.update_activity = AsyncMock(
+            side_effect=ConnectionError("redis is down")
+        )
+        consumer.session_store.update_segment = AsyncMock(
+            side_effect=ConnectionError("redis is down")
+        )
+        try:
+            fps = consumer.processing_config.frames_per_segment
+            queue = consumer._get_or_create_worker("c:d", "c", "d")
+            for i in range(fps):
+                await queue.put(_make_event("c", "d", i))
+
+            await consumer._shutdown_workers()
+
+            assert len(calls) == 1
+            assert calls[0][2] == 0
         finally:
             _shutdown_executors(consumer)
 

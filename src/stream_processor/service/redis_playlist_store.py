@@ -60,7 +60,13 @@ class RedisPlaylistStore:
     async def connect(self) -> redis.Redis:
         """Connect to Redis and return the client."""
         if self._client is None:
-            self._client = redis.from_url(self.redis_url, decode_responses=True)
+            self._client = redis.from_url(
+                self.redis_url,
+                decode_responses=True,
+                socket_timeout=settings.redis.socket_timeout_seconds,
+                socket_connect_timeout=settings.redis.socket_connect_timeout_seconds,
+                health_check_interval=settings.redis.health_check_interval_seconds,
+            )
             # Test connection
             await self._client.ping()  # type: ignore[misc]
             logger.info(f"Playlist store connected to Redis at {self._redact_url(self.redis_url)}")
