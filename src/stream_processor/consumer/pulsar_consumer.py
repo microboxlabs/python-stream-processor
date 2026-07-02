@@ -217,6 +217,10 @@ class StreamProcessorConsumer:
             # not a graceful shutdown (e.g. cancellation or a non-Exception error).
             self.device_queues.pop(state_key, None)
             self.device_workers.pop(state_key, None)
+            # Keep the gauge balanced: recreation runs _init_device_state again,
+            # which re-registers the state and increments the gauge.
+            if self.device_states.pop(state_key, None) is not None:
+                active_devices_gauge.dec()
 
     async def _consume_one(self, state: DeviceState, queue: asyncio.Queue, interval: int) -> bool:
         """
@@ -385,8 +389,17 @@ class StreamProcessorConsumer:
         )
 
         # Refresh session first — a session boundary resets the PTS offset, which
-        # we snapshot below for this segment.
-        await self._update_session(state)
+        # we snapshot below for this segment. Session tracking is auxiliary
+        # (offline detection, PTS session boundaries), so a Redis failure here
+        # must not abort generation: aborting would keep pending_frames pinned
+        # while new frames accumulate unbounded during a persistent outage,
+        # even though the segment itself only needs GCS. The next successful
+        # refresh re-syncs the session.
+        try:
+            await self._update_session(state)
+        except Exception as e:
+            processing_errors_total.labels(device_id=state_key, error_type="session").inc()
+            logger.warning(f"Session refresh failed for {state_key}; generating anyway: {e}")
 
         segment_number = await self._next_segment_number(state)
         logger.info(f"Generating segment {segment_number} for {state_key} ({len(frames)} frames)")
