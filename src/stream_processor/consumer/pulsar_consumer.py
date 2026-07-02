@@ -207,8 +207,7 @@ class StreamProcessorConsumer:
                             device_id=state_key, error_type="generate"
                         ).inc()
                         logger.error(
-                            f"Segment generation failed for {state_key}; "
-                            f"retrying next tick: {e}",
+                            f"Segment generation failed for {state_key}; retrying next tick: {e}",
                             exc_info=True,
                         )
         finally:
