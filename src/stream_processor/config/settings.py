@@ -122,6 +122,25 @@ class RedisConfig(BaseSettings):
             "in-memory and seeded from storage on startup."
         ),
     )
+    socket_timeout_seconds: float = Field(
+        default=10.0,
+        description=(
+            "Max seconds a Redis command may block on the socket before raising "
+            "TimeoutError. Without this, a command on a half-dead connection "
+            "(e.g. the Redis pod was rescheduled and the old peer IP black-holes "
+            "traffic) blocks forever and stalls every device worker."
+        ),
+    )
+    socket_connect_timeout_seconds: float = Field(
+        default=5.0, description="Max seconds to wait when establishing a Redis connection"
+    )
+    health_check_interval_seconds: int = Field(
+        default=30,
+        description=(
+            "PING connections idle for this many seconds before reuse, so dead "
+            "pooled connections are detected and replaced instead of handed out"
+        ),
+    )
 
 
 class MetricsConfig(BaseSettings):

@@ -195,10 +195,29 @@ class StreamProcessorConsumer:
             while not shutting_down:
                 shutting_down = await self._consume_one(state, queue, interval)
                 if state.should_generate_segment(frames_per_segment, max_wait_seconds=max_wait):
-                    await self._generate_segment(state)
+                    try:
+                        await self._generate_segment(state)
+                    except Exception as e:
+                        # A worker that dies leaves its queue registered but
+                        # undrained, which eventually blocks _dispatch and stalls
+                        # the whole consumer — so no failure here may be fatal.
+                        # Pending frames stay in state and generation is retried
+                        # on the next tick.
+                        processing_errors_total.labels(
+                            device_id=state_key, error_type="generate"
+                        ).inc()
+                        logger.error(
+                            f"Segment generation failed for {state_key}; "
+                            f"retrying next tick: {e}",
+                            exc_info=True,
+                        )
         finally:
             # Flush remaining frames so a graceful stop doesn't drop a partial segment.
             await self._flush_pending_frames(state)
+            # Unregister so a later frame recreates the worker if this exit was
+            # not a graceful shutdown (e.g. cancellation or a non-Exception error).
+            self.device_queues.pop(state_key, None)
+            self.device_workers.pop(state_key, None)
 
     async def _consume_one(self, state: DeviceState, queue: asyncio.Queue, interval: int) -> bool:
         """
