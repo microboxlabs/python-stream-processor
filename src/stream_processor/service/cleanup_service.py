@@ -48,8 +48,7 @@ class CleanupService:
                 gcs_project_id=self.storage_config.gcs_project_id,
             )
 
-        # Run cleanup every 5 minutes
-        self.cleanup_interval_seconds = 300
+        self.cleanup_interval_seconds = settings.processing.cleanup_interval_seconds
 
         # Redis playlist store for removing segment metadata during cleanup
         self.playlist_store: RedisPlaylistStore | None = None
@@ -118,8 +117,11 @@ class CleanupService:
         total_deleted = 0
         total_bytes_freed = 0
 
-        # Iterate through all devices using the storage backend
-        for client_id, device_id in self.storage.list_all_devices():
+        # Materialize the device list once: on GCS every scan is a billable
+        # listing, and this cycle needs the same list twice.
+        devices = list(self.storage.list_all_devices())
+
+        for client_id, device_id in devices:
             state_key = f"{client_id}:{device_id}"
 
             # Clean up old segments
@@ -164,7 +166,7 @@ class CleanupService:
             total_bytes_freed += bytes_freed
 
         # Also clean up old source frames
-        await self._cleanup_frames(cutoff_timestamp)
+        await self._cleanup_frames(cutoff_timestamp, devices)
 
         # Clean up stale temporary files (GCS backend downloads/intermediates)
         temp_removed = self.storage.cleanup_temp_files(max_age_seconds=600)
@@ -180,20 +182,25 @@ class CleanupService:
                 f"{total_bytes_freed / 1024 / 1024:.2f} MB freed in {duration:.2f}s"
             )
 
-    async def _cleanup_frames(self, cutoff_timestamp: float) -> None:
+    async def _cleanup_frames(
+        self, cutoff_timestamp: float, devices: list[tuple[str, str]]
+    ) -> None:
         """
         Clean up old source frames.
 
         Frames are deleted after they've been encoded into segments
         and are older than retention period.
 
+        Args:
+            cutoff_timestamp: Delete frames modified before this Unix timestamp
+            devices: Client/device pairs from the caller's single storage scan
+
         Directory structure:
         {base_path}/client_ids/{client_id}/device_id/{device_id}/frames/
         """
         deleted_count = 0
 
-        # Iterate through all devices
-        for client_id, device_id in self.storage.list_all_devices():
+        for client_id, device_id in devices:
             # Clean up old frames (jpg and png)
             for pattern in ["*.jpg", "*.jpeg", "*.png"]:
                 for file_info in self.storage.list_files(

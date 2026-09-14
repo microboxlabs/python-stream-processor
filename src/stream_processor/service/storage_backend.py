@@ -450,13 +450,16 @@ class GcsStorageBackend(StorageBackend):
 
     def read_file(self, client_id: str, device_id: str, subpath: str) -> bytes | None:
         """Read file from GCS."""
+        from google.api_core.exceptions import NotFound
+
         blob_path = self._get_blob_path(client_id, device_id, subpath)
         blob = self.bucket.blob(blob_path)
 
-        if not blob.exists():
+        # Download straight away: exists() would be a second billable Class B op.
+        try:
+            result: bytes = blob.download_as_bytes()
+        except NotFound:
             return None
-
-        result: bytes = blob.download_as_bytes()
         return result
 
     def file_exists(self, client_id: str, device_id: str, subpath: str) -> bool:
@@ -468,23 +471,28 @@ class GcsStorageBackend(StorageBackend):
 
     def delete_file(self, client_id: str, device_id: str, subpath: str) -> bool:
         """Delete file from GCS."""
+        from google.api_core.exceptions import NotFound
+
         blob_path = self._get_blob_path(client_id, device_id, subpath)
         blob = self.bucket.blob(blob_path)
 
-        if blob.exists():
+        # delete() is free; exists() is a billable Class B op. Delete and catch.
+        try:
             blob.delete()
-            return True
-        return False
+        except NotFound:
+            return False
+        return True
 
     def get_file_info(self, client_id: str, device_id: str, subpath: str) -> FileInfo | None:
         """Get file metadata from GCS."""
         blob_path = self._get_blob_path(client_id, device_id, subpath)
-        blob = self.bucket.blob(blob_path)
 
-        if not blob.exists():
+        # get_blob() fetches metadata in one op and returns None when missing;
+        # exists() + reload() would cost two.
+        blob = self.bucket.get_blob(blob_path)
+        if blob is None:
             return None
 
-        blob.reload()  # Fetch metadata
         return FileInfo(
             name=blob_path.split("/")[-1],
             size=blob.size or 0,
@@ -519,19 +527,38 @@ class GcsStorageBackend(StorageBackend):
                 mtime=blob.updated.timestamp() if blob.updated else 0,
             )
 
-    def list_all_devices(self) -> Iterator[tuple[str, str]]:
-        """List all client/device pairs in GCS."""
-        # List blobs with prefix to find unique client_id/device_id combinations
-        seen: set[tuple[str, str]] = set()
+    def _list_prefixes(self, prefix: str) -> list[str]:
+        """
+        List the immediate "subdirectory" prefixes under a prefix.
 
-        for blob in self.client.list_blobs(self.bucket_name, prefix="client_ids/"):
-            # Parse path: client_ids/{client_id}/device_id/{device_id}/...
-            parts = blob.name.split("/")
-            if len(parts) >= 4 and parts[0] == "client_ids" and parts[2] == "device_id":
-                pair = (parts[1], parts[3])
-                if pair not in seen:
-                    seen.add(pair)
-                    yield pair
+        delimiter="/" makes GCS collapse everything below one level into a
+        prefix. Prefixes are only populated once the pages have been walked,
+        hence the explicit page loop.
+        """
+        iterator = self.client.list_blobs(self.bucket_name, prefix=prefix, delimiter="/")
+        for _ in iterator.pages:
+            pass
+        return sorted(iterator.prefixes)
+
+    def list_all_devices(self) -> Iterator[tuple[str, str]]:
+        """
+        List all client/device pairs in GCS.
+
+        Walks two prefix levels (client_ids/{client_id}/device_id/{device_id}/)
+        rather than enumerating every object under client_ids/. Costs
+        1 + N_clients Class A operations, independent of objects stored.
+        """
+        for client_prefix in self._list_prefixes("client_ids/"):
+            # client_prefix is "client_ids/{client_id}/"
+            client_id = client_prefix.rstrip("/").split("/")[-1]
+            if not client_id:
+                continue
+
+            for device_prefix in self._list_prefixes(f"{client_prefix}device_id/"):
+                # device_prefix is "client_ids/{client_id}/device_id/{device_id}/"
+                device_id = device_prefix.rstrip("/").split("/")[-1]
+                if device_id:
+                    yield (client_id, device_id)
 
     def get_local_path(self, client_id: str, device_id: str, subpath: str) -> Path | None:
         """

@@ -413,11 +413,12 @@ class ArchiveService:
             # Database not configured
             return 0
 
-        # Find expired archives
+        # 'failed' rows are included: _mark_archive_failed leaves partial
+        # segments in storage and nothing else deletes them.
         rows = await pool.fetch("""
             SELECT id, client_id, device_id, session_id, archive_path
             FROM deferred_transmissions
-            WHERE status = 'ready' AND expires_at < CURRENT_TIMESTAMP
+            WHERE status IN ('ready', 'failed') AND expires_at < CURRENT_TIMESTAMP
             """)
 
         deleted_count = 0
