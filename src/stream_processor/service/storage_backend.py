@@ -11,12 +11,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
 from ..utils.logger import get_logger
-
-if TYPE_CHECKING:
-    from google.cloud import storage
 
 logger = get_logger(__name__)
 
@@ -368,8 +365,9 @@ class GcsStorageBackend(StorageBackend):
         self.project_id = project_id
 
         # Initialize client lazily; google.cloud is imported on first use.
-        self._client: storage.Client | None = None
-        self._bucket: storage.Bucket | None = None
+        # Any, not storage.Client: the library ships no type stubs.
+        self._client: Any = None
+        self._bucket: Any = None
 
         # Temp directory for local operations (FFmpeg compatibility)
         self._temp_dir = Path(tempfile.mkdtemp(prefix="stream_processor_gcs_"))
