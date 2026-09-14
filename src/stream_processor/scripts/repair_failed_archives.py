@@ -45,6 +45,7 @@ import argparse
 import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import asyncpg
 
@@ -193,6 +194,82 @@ async def discard(pool, storage: StorageBackend, archive: Archive) -> bool:
     return True
 
 
+async def fetch_failed(pool, session_ids: list[str] | None) -> list[Any]:
+    """Fetch the 'failed' rows, narrowed to session_ids when given."""
+    # asyncpg is untyped, so bind to a typed local rather than return Any.
+    rows: list[Any]
+    if session_ids:
+        rows = await pool.fetch(SELECT_FAILED_BY_SESSION, session_ids)
+    else:
+        rows = await pool.fetch(SELECT_FAILED)
+    return rows
+
+
+def log_nothing_found(session_ids: list[str] | None) -> None:
+    """Say why the result was empty, which is not always "nothing is broken"."""
+    if session_ids:
+        logger.info(
+            f"No 'failed' archive matches {', '.join(session_ids)}. "
+            f"Run without --session-id to list what is failed."
+        )
+    else:
+        logger.info("No archives in 'failed' state")
+
+
+def log_report(archives: list[Archive], complete: list[Archive]) -> None:
+    """Log one line per archive, then warn about the ones with gaps."""
+    partial_count = len(archives) - len(complete)
+    logger.info(
+        f"{len(archives)} failed archive(s): {len(complete)} complete, "
+        f"{partial_count} partial, {sum(a.bytes for a in archives) / 1e9:.2f} GB total"
+    )
+    for a in archives:
+        logger.info(a.describe())
+
+    # Only the complete ones; --repair never touches the rest, so promising to
+    # restore a partial archive here would contradict the skip message it gets.
+    for a in complete:
+        if a.missing:
+            logger.warning(
+                f"Archive {a.row['session_id']} is short {a.missing} segment(s). "
+                f"Its playlist exists, so --repair restores it, but the "
+                f"recording has gaps."
+            )
+
+
+def plan_action(args, archives, complete, partial) -> tuple[list[Archive], list[Archive], str, str]:
+    """Split the archives into what this mode acts on and what it leaves."""
+    if args.repair:
+        return complete, partial, "repair", "no playlist, so the recording is incomplete"
+    if args.force:
+        return archives, [], "discard", ""
+    return partial, complete, "discard", "playlist present; pass --force to discard anyway"
+
+
+async def apply_action(pool, storage, args, targets: list[Archive]) -> int:
+    """Run the chosen mutation over the targets, counting what really changed."""
+    acted = 0
+    for a in targets:
+        if args.repair:
+            changed = await repair(pool, a, args.extend_days)
+            done = "now 'ready'"
+        else:
+            changed = await discard(pool, storage, a)
+            done = "storage deleted"
+
+        if changed:
+            acted += 1
+            logger.info(
+                f"{'Repaired' if args.repair else 'Discarded'} {a.row['session_id']}: {done}"
+            )
+        else:
+            logger.warning(
+                f"Left {a.row['session_id']} alone: it stopped being 'failed' "
+                f"after this run listed it. Re-run to see its current state."
+            )
+    return acted
+
+
 async def run(args) -> int:
     database_url = settings.archive.database_url
     if not database_url:
@@ -202,54 +279,21 @@ async def run(args) -> int:
     storage = build_storage()
     pool = await asyncpg.create_pool(database_url)
     try:
-        if args.session_id:
-            rows = await pool.fetch(SELECT_FAILED_BY_SESSION, args.session_id)
-        else:
-            rows = await pool.fetch(SELECT_FAILED)
-
+        rows = await fetch_failed(pool, args.session_id)
         if not rows:
-            if args.session_id:
-                logger.info(
-                    f"No 'failed' archive matches {', '.join(args.session_id)}. "
-                    f"Run without --session-id to list what is failed."
-                )
-            else:
-                logger.info("No archives in 'failed' state")
+            log_nothing_found(args.session_id)
             return 0
 
         archives = [Archive(r, storage) for r in rows]
         complete = [a for a in archives if a.complete]
         partial = [a for a in archives if not a.complete]
-
-        logger.info(
-            f"{len(archives)} failed archive(s): {len(complete)} complete, "
-            f"{len(partial)} partial, {sum(a.bytes for a in archives) / 1e9:.2f} GB total"
-        )
-        for a in archives:
-            logger.info(a.describe())
-
-        # Only the complete ones; --repair never touches the rest, so promising
-        # to restore a partial archive here would contradict the skip below.
-        for a in complete:
-            if a.missing:
-                logger.warning(
-                    f"Archive {a.row['session_id']} is short {a.missing} segment(s). "
-                    f"Its playlist exists, so --repair restores it, but the "
-                    f"recording has gaps."
-                )
+        log_report(archives, complete)
 
         if not (args.repair or args.discard):
             logger.info("Read-only. --repair restores the complete ones, --discard deletes")
             return 0
 
-        if args.repair:
-            targets, skipped = complete, partial
-            verb, why = "repair", "no playlist, so the recording is incomplete"
-        else:
-            targets = archives if args.force else partial
-            skipped = [] if args.force else complete
-            verb, why = "discard", "playlist present; pass --force to discard anyway"
-
+        targets, skipped, verb, why = plan_action(args, archives, complete, partial)
         for a in skipped:
             logger.info(f"Skipping {a.row['session_id']}: {why}")
 
@@ -261,24 +305,7 @@ async def run(args) -> int:
             logger.info(f"Would {verb} {len(targets)} archive(s). Re-run with --yes")
             return 0
 
-        acted = 0
-        for a in targets:
-            if args.repair:
-                changed = await repair(pool, a, args.extend_days)
-                if changed:
-                    logger.info(f"Repaired {a.row['session_id']}: now 'ready'")
-            else:
-                changed = await discard(pool, storage, a)
-                if changed:
-                    logger.info(f"Discarded {a.row['session_id']}: storage deleted")
-            if changed:
-                acted += 1
-            else:
-                logger.warning(
-                    f"Left {a.row['session_id']} alone: it stopped being 'failed' "
-                    f"after this run listed it. Re-run to see its current state."
-                )
-
+        acted = await apply_action(pool, storage, args, targets)
         if args.repair:
             logger.info(
                 f"{acted} archive(s) marked 'ready', expiring in "
