@@ -62,6 +62,14 @@ SELECT_FAILED = """
     ORDER BY expires_at
     """
 
+SELECT_FAILED_BY_SESSION = """
+    SELECT id, client_id, device_id, session_id, archive_path, segment_count,
+           started_at, ended_at, duration_seconds, expires_at
+    FROM deferred_transmissions
+    WHERE status = 'failed' AND session_id = ANY($1)
+    ORDER BY expires_at
+    """
+
 
 class Archive:
     """A 'failed' row paired with what its storage actually holds."""
@@ -98,7 +106,9 @@ class Archive:
         than the row claims — so only a shortfall means anything, and it means
         the recording has gaps even though the playlist says it finished.
         """
-        return max(0, self.row["segment_count"] - len(self.segments))
+        # asyncpg Records are Any, so type the local to keep the return typed.
+        claimed: int = self.row["segment_count"]
+        return max(0, claimed - len(self.segments))
 
     def describe(self) -> str:
         row = self.row
@@ -108,11 +118,12 @@ class Archive:
         drift = "" if counted == claimed else f" (row says {claimed})"
         if self.missing:
             drift += f", {self.missing} MISSING"
+        # Not every failed row is expired, so report the date, not a verdict.
         return (
             f"{state:<8} id={row['id']:<6} session={row['session_id']} "
             f"device={row['device_id']} {counted} segments{drift} "
             f"{self.bytes / 1e9:.2f} GB {row['duration_seconds']}s "
-            f"expired {row['expires_at']:%Y-%m-%d}"
+            f"expires {row['expires_at']:%Y-%m-%d}"
         )
 
 
@@ -126,23 +137,52 @@ def build_storage() -> StorageBackend:
     )
 
 
-async def repair(pool, archive: Archive, extend_days: int) -> None:
-    """Mark the row 'ready' and restart its retention clock from now."""
+async def repair(pool, archive: Archive, extend_days: int) -> bool:
+    """
+    Mark the row 'ready' and restart its retention clock from now.
+
+    Returns whether the row was still 'failed' and so actually changed.
+    """
     expires_at = datetime.now(timezone.utc) + timedelta(days=extend_days)  # noqa: UP017
-    await pool.execute(
+    claimed = await pool.fetchval(
         """
         UPDATE deferred_transmissions
         SET status = 'ready', expires_at = $2, updated_at = CURRENT_TIMESTAMP
         WHERE id = $1 AND status = 'failed'
+        RETURNING id
         """,
         archive.row["id"],
         expires_at,
     )
+    return claimed is not None
 
 
-async def discard(pool, storage: StorageBackend, archive: Archive) -> None:
-    """Delete the archive's storage, then mark the row 'deleted'."""
+async def discard(pool, storage: StorageBackend, archive: Archive) -> bool:
+    """
+    Mark the row 'deleted', then delete the archive's storage.
+
+    The row is claimed first, and the files are deleted only if that claim
+    won. Deleting the files first would let a --repair running in another
+    shell flip the row to 'ready' in between, leaving a live row pointing at
+    storage this run had already emptied. Claiming first trades that for a
+    smaller risk: a crash mid-delete leaves orphaned files behind a 'deleted'
+    row, which wastes space but loses nothing.
+
+    Returns whether the row was still 'failed' and so actually changed.
+    """
     row = archive.row
+    claimed = await pool.fetchval(
+        """
+        UPDATE deferred_transmissions
+        SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'failed'
+        RETURNING id
+        """,
+        row["id"],
+    )
+    if claimed is None:
+        return False
+
     for file_info in archive.segments:
         storage.delete_file(
             row["client_id"],
@@ -150,14 +190,7 @@ async def discard(pool, storage: StorageBackend, archive: Archive) -> None:
             f"{row['archive_path']}/segments/{file_info.name}",
         )
     storage.delete_file(row["client_id"], row["device_id"], f"{row['archive_path']}/playlist.m3u8")
-    await pool.execute(
-        """
-        UPDATE deferred_transmissions
-        SET status = 'deleted', updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1 AND status = 'failed'
-        """,
-        row["id"],
-    )
+    return True
 
 
 async def run(args) -> int:
@@ -169,13 +202,19 @@ async def run(args) -> int:
     storage = build_storage()
     pool = await asyncpg.create_pool(database_url)
     try:
-        rows = await pool.fetch(SELECT_FAILED)
         if args.session_id:
-            wanted = set(args.session_id)
-            rows = [r for r in rows if r["session_id"] in wanted]
+            rows = await pool.fetch(SELECT_FAILED_BY_SESSION, args.session_id)
+        else:
+            rows = await pool.fetch(SELECT_FAILED)
 
         if not rows:
-            logger.info("No archives in 'failed' state")
+            if args.session_id:
+                logger.info(
+                    f"No 'failed' archive matches {', '.join(args.session_id)}. "
+                    f"Run without --session-id to list what is failed."
+                )
+            else:
+                logger.info("No archives in 'failed' state")
             return 0
 
         archives = [Archive(r, storage) for r in rows]
@@ -189,7 +228,9 @@ async def run(args) -> int:
         for a in archives:
             logger.info(a.describe())
 
-        for a in archives:
+        # Only the complete ones; --repair never touches the rest, so promising
+        # to restore a partial archive here would contradict the skip below.
+        for a in complete:
             if a.missing:
                 logger.warning(
                     f"Archive {a.row['session_id']} is short {a.missing} segment(s). "
@@ -220,19 +261,31 @@ async def run(args) -> int:
             logger.info(f"Would {verb} {len(targets)} archive(s). Re-run with --yes")
             return 0
 
+        acted = 0
         for a in targets:
             if args.repair:
-                await repair(pool, a, args.extend_days)
-                logger.info(f"Repaired {a.row['session_id']}: now 'ready'")
+                changed = await repair(pool, a, args.extend_days)
+                if changed:
+                    logger.info(f"Repaired {a.row['session_id']}: now 'ready'")
             else:
-                await discard(pool, storage, a)
-                logger.info(f"Discarded {a.row['session_id']}: storage deleted")
+                changed = await discard(pool, storage, a)
+                if changed:
+                    logger.info(f"Discarded {a.row['session_id']}: storage deleted")
+            if changed:
+                acted += 1
+            else:
+                logger.warning(
+                    f"Left {a.row['session_id']} alone: it stopped being 'failed' "
+                    f"after this run listed it. Re-run to see its current state."
+                )
 
         if args.repair:
             logger.info(
-                f"{len(targets)} archive(s) marked 'ready', expiring in "
+                f"{acted} archive(s) marked 'ready', expiring in "
                 f"{args.extend_days} days. Normal retention reaps them after that."
             )
+        else:
+            logger.info(f"{acted} archive(s) discarded")
         return 0
     finally:
         await pool.close()
