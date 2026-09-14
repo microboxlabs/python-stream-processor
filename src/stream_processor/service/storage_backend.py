@@ -377,21 +377,25 @@ class GcsStorageBackend(StorageBackend):
     @property
     def client(self):
         """Lazy-load GCS client."""
-        if self._client is None:
+        client = self._client
+        if client is None:
             from google.cloud import storage
 
             if self.project_id:
-                self._client = storage.Client(project=self.project_id)
+                client = storage.Client(project=self.project_id)
             else:
-                self._client = storage.Client()
-        return self._client
+                client = storage.Client()
+            self._client = client
+        return client
 
     @property
     def bucket(self):
         """Lazy-load bucket reference."""
-        if self._bucket is None:
-            self._bucket = self.client.bucket(self.bucket_name)
-        return self._bucket
+        bucket = self._bucket
+        if bucket is None:
+            bucket = self.client.bucket(self.bucket_name)
+            self._bucket = bucket
+        return bucket
 
     def get_storage_type(self) -> str:
         return "gcs"
