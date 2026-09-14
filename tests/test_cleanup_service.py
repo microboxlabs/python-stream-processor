@@ -1,5 +1,6 @@
 """Tests for CleanupService scan cost and interval configuration."""
 
+import asyncio
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -95,6 +96,25 @@ class TestScanCost:
         assert ("client-a", "device-1", "hls/segments/seg_000001.ts") in storage.deleted
         assert ("client-a", "device-1", "frames/f.jpg") in storage.deleted
         assert ("client-b", "device-2", "hls/segments/seg_000002.ts") not in storage.deleted
+
+
+class TestShutdown:
+    async def test_stop_cuts_the_inter_cycle_wait_short(self, storage):
+        """stop() must not have to outlast a whole interval."""
+        service = CleanupService(storage=storage)
+        service.cleanup_interval_seconds = 3600
+
+        task = asyncio.create_task(service.run())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if service._stop_event is not None and service.running:
+                break
+
+        await service.stop()
+
+        # Fails by timing out if run() is still sitting in the interval wait.
+        await asyncio.wait_for(task, timeout=2)
+        assert service.running is False
 
 
 @pytest.fixture

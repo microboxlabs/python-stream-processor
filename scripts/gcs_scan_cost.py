@@ -2,13 +2,10 @@
 """
 Measure the Class A cost of one device scan against a real GCS bucket.
 
-Read-only. Counts the listings `GcsStorageBackend.list_all_devices()` issues —
-one listing is one Class A operation, plus one more per 1000 results in it —
-and projects the daily cost at the configured cleanup interval.
-
-Listings, not pages: a listing that returns over 1000 prefixes costs more than
-the one op counted here. Compare against the bucket's real client and device
-counts when either is near a multiple of 1000.
+Read-only. Counts the list pages `GcsStorageBackend.list_all_devices()`
+fetches — one page is one Class A operation — and projects the daily cost at
+the configured cleanup interval. Pagination is included: a level holding more
+than 1000 prefixes costs the extra pages it takes to read.
 
 Usage:
     python scripts/gcs_scan_cost.py                    # uses STORAGE_GCS_BUCKET
@@ -30,15 +27,16 @@ CLASS_A_USD_PER_1000 = 0.005
 
 
 class CountingBackend(GcsStorageBackend):
-    """A GCS backend that records how many listings a scan issues."""
+    """A GCS backend that records how many list pages a scan fetches."""
 
     def __init__(self, bucket_name: str, project_id: str | None = None):
         super().__init__(bucket_name, project_id)
-        self.listings = 0
+        self.pages = 0
 
-    def _list_prefixes(self, prefix: str) -> list[str]:
-        self.listings += 1
-        return super()._list_prefixes(prefix)
+    def _walk_pages(self, iterator):
+        for page in super()._walk_pages(iterator):
+            self.pages += 1
+            yield page
 
 
 def main() -> int:
@@ -70,11 +68,11 @@ def main() -> int:
     elapsed = time.time() - started
 
     scans_per_day = 86400 / interval
-    ops_per_day = backend.listings * scans_per_day
+    ops_per_day = backend.pages * scans_per_day
 
     print(f"bucket:            {bucket}")
     print(f"devices found:     {len(devices)}")
-    print(f"class A ops/scan:  {backend.listings}")
+    print(f"class A ops/scan:  {backend.pages}")
     print(f"scan duration:     {elapsed:.1f}s")
     print(f"cleanup interval:  {interval}s ({scans_per_day:.0f} scans/day)")
     print(f"class A ops/day:   {ops_per_day:,.0f}")

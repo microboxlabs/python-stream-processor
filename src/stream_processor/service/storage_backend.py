@@ -542,10 +542,18 @@ class GcsStorageBackend(StorageBackend):
         iterator = self.client.list_blobs(self.bucket_name, prefix=prefix, delimiter="/")
 
         prefixes: set[str] = set()
-        for _page in iterator.pages:
+        for _page in self._walk_pages(iterator):
             prefixes.update(iterator.prefixes)
 
         return sorted(prefixes)
+
+    def _walk_pages(self, iterator):
+        """
+        Yield each page of a listing. One page is one Class A operation.
+
+        A seam for tooling that meters scan cost; see scripts/gcs_scan_cost.py.
+        """
+        return iterator.pages
 
     def list_all_devices(self) -> Iterator[tuple[str, str]]:
         """

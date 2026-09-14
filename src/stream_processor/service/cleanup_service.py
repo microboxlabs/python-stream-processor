@@ -6,6 +6,7 @@ Supports both filesystem and GCS storage backends.
 """
 
 import asyncio
+import contextlib
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -50,6 +51,10 @@ class CleanupService:
 
         self.cleanup_interval_seconds = settings.processing.cleanup_interval_seconds
 
+        # Set by stop() to cut the inter-cycle wait short, so shutdown does not
+        # have to outlast a whole interval.
+        self._stop_event = asyncio.Event()
+
         # Redis playlist store for removing segment metadata during cleanup
         self.playlist_store: RedisPlaylistStore | None = None
 
@@ -85,13 +90,17 @@ class CleanupService:
             except Exception as e:
                 logger.error(f"Cleanup error: {e}", exc_info=True)
 
-            # Wait for next cleanup cycle
-            await asyncio.sleep(self.cleanup_interval_seconds)
+            # Wait for the next cycle, or return as soon as stop() fires.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self.cleanup_interval_seconds
+                )
 
     async def stop(self) -> None:
         """Stop the cleanup service."""
         logger.info("Stopping cleanup service...")
         self.running = False
+        self._stop_event.set()
 
         # Close Redis playlist store
         if self.playlist_store:
