@@ -6,8 +6,10 @@ Models the two things the cost work cares about:
 - `list_blobs(delimiter="/")` returns only the objects directly under the
   prefix plus the collapsed sub-prefixes, and `prefixes` is populated as pages
   are walked (the real iterator behaves the same way).
-- Every page fetched is one Class A operation and every blob-level request is
-  one Class B operation, both counted so tests can assert on them.
+- Every page fetched is one Class A operation and every successful blob-level
+  request is one Class B operation, both counted so tests can assert on them.
+  A request that 404s is not counted: GCS does not charge for 4xx responses
+  (absent a website configuration), so a missing object is free to probe.
 """
 
 from google.api_core.exceptions import NotFound
@@ -33,19 +35,21 @@ class FakeBlob:
         return self._bucket.mtimes.get(self.name)
 
     def exists(self) -> bool:
+        if self.name not in self._bucket.objects:
+            return False
         self._bucket.class_b_ops += 1
-        return self.name in self._bucket.objects
+        return True
 
     def reload(self) -> None:
-        self._bucket.class_b_ops += 1
         if self.name not in self._bucket.objects:
             raise NotFound(self.name)
+        self._bucket.class_b_ops += 1
 
     def download_as_bytes(self) -> bytes:
-        self._bucket.class_b_ops += 1
         data = self._data
         if data is None:
             raise NotFound(self.name)
+        self._bucket.class_b_ops += 1
         return data
 
     def upload_from_string(self, data: bytes, content_type: str | None = None) -> None:
@@ -65,15 +69,15 @@ class FakeBucket:
         self.objects: dict[str, bytes] = dict(objects or {})
         self.mtimes: dict = {}
         self.class_a_ops = 0  # list pages fetched
-        self.class_b_ops = 0  # metadata reads / downloads
+        self.class_b_ops = 0  # successful metadata reads / downloads
 
     def blob(self, name: str) -> FakeBlob:
         return FakeBlob(self, name)
 
     def get_blob(self, name: str) -> FakeBlob | None:
-        self.class_b_ops += 1
         if name not in self.objects:
             return None
+        self.class_b_ops += 1
         return FakeBlob(self, name)
 
 

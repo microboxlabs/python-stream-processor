@@ -1,6 +1,7 @@
 """Tests for CleanupService scan cost and interval configuration."""
 
 import asyncio
+import fnmatch
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -47,7 +48,11 @@ class CountingStorage(StorageBackend):
         return None
 
     def list_files(self, client_id, device_id, subpath, pattern=None) -> Iterator[FileInfo]:
-        yield from self.files.get((client_id, device_id), {}).get(subpath, [])
+        for info in self.files.get((client_id, device_id), {}).get(subpath, []):
+            # Honour the StorageBackend.list_files contract: without this the
+            # frame cleanup's three extension patterns each match every file.
+            if pattern is None or fnmatch.fnmatch(info.name, pattern):
+                yield info
 
     def list_all_devices(self) -> Iterator[tuple[str, str]]:
         self.scan_count += 1
@@ -70,7 +75,11 @@ def storage():
         {
             ("client-a", "device-1"): {
                 "hls/segments": [FileInfo(name="seg_000001.ts", size=100, mtime=old)],
-                "frames": [FileInfo(name="f.jpg", size=10, mtime=old)],
+                "frames": [
+                    FileInfo(name="f.jpg", size=10, mtime=old),
+                    FileInfo(name="f.png", size=10, mtime=old),
+                    FileInfo(name="keep.txt", size=10, mtime=old),
+                ],
             },
             ("client-b", "device-2"): {
                 "hls/segments": [FileInfo(name="seg_000002.ts", size=100, mtime=time.time())],
@@ -94,8 +103,12 @@ class TestScanCost:
         await service._run_cleanup()
 
         assert ("client-a", "device-1", "hls/segments/seg_000001.ts") in storage.deleted
-        assert ("client-a", "device-1", "frames/f.jpg") in storage.deleted
         assert ("client-b", "device-2", "hls/segments/seg_000002.ts") not in storage.deleted
+        # Once each, not once per extension pattern the frame cleanup tries.
+        assert storage.deleted.count(("client-a", "device-1", "frames/f.jpg")) == 1
+        assert storage.deleted.count(("client-a", "device-1", "frames/f.png")) == 1
+        # Only the frame extensions are swept.
+        assert ("client-a", "device-1", "frames/keep.txt") not in storage.deleted
 
 
 class TestShutdown:

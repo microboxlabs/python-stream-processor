@@ -111,11 +111,12 @@ class TestBlobOperationCosts:
         assert bucket.class_b_ops == 1
 
     def test_read_file_returns_none_when_missing(self, gcs):
+        """A 404 is not billed, so probing for an absent object is free."""
         backend, bucket = gcs
         bucket.class_b_ops = 0
 
         assert backend.read_file("c", "d", "nope.ts") is None
-        assert bucket.class_b_ops == 1
+        assert bucket.class_b_ops == 0
 
     def test_delete_file_costs_no_class_b_op(self, gcs):
         backend, bucket = gcs
