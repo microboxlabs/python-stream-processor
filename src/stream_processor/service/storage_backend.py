@@ -11,8 +11,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from google.cloud import storage
 
 logger = get_logger(__name__)
 
@@ -360,12 +364,10 @@ class GcsStorageBackend(StorageBackend):
             bucket_name: GCS bucket name
             project_id: Optional GCP project ID (uses ADC if not specified)
         """
-        from google.cloud import storage
-
         self.bucket_name = bucket_name
         self.project_id = project_id
 
-        # Initialize client lazily
+        # Initialize client lazily; google.cloud is imported on first use.
         self._client: storage.Client | None = None
         self._bucket: storage.Bucket | None = None
 
