@@ -18,6 +18,10 @@ from .storage_backend import StorageBackend, create_storage_backend
 
 logger = get_logger(__name__)
 
+# Source frame extensions written by the encoder, matched case-sensitively as
+# the previous glob patterns were.
+FRAME_SUFFIXES = (".jpg", ".jpeg", ".png")
+
 
 class CleanupService:
     """
@@ -82,9 +86,15 @@ class CleanupService:
         if self.playlist_store:
             await self.playlist_store.connect()
 
+        # stop() can land while connect() is in flight. Starting the loop then
+        # would spin: the wait below returns instantly on an already-set event.
+        if self._stop_event.is_set():
+            logger.info("Cleanup service stopped before its first cycle")
+            return
+
         self.running = True
 
-        while self.running:
+        while not self._stop_event.is_set():
             try:
                 await self._run_cleanup()
             except Exception as e:
@@ -95,6 +105,8 @@ class CleanupService:
                 await asyncio.wait_for(
                     self._stop_event.wait(), timeout=self.cleanup_interval_seconds
                 )
+
+        self.running = False
 
     async def stop(self) -> None:
         """Stop the cleanup service."""
@@ -174,8 +186,12 @@ class CleanupService:
             total_deleted += deleted_count
             total_bytes_freed += bytes_freed
 
+            # Storage calls here are blocking. Hand the loop back between
+            # devices so the frame consumer is not starved for a whole cycle.
+            await asyncio.sleep(0)
+
         # Also clean up old source frames
-        self._cleanup_frames(cutoff_timestamp, devices)
+        await self._cleanup_frames(cutoff_timestamp, devices)
 
         # Clean up stale temporary files (GCS backend downloads/intermediates)
         temp_removed = self.storage.cleanup_temp_files(max_age_seconds=600)
@@ -191,7 +207,9 @@ class CleanupService:
                 f"{total_bytes_freed / 1024 / 1024:.2f} MB freed in {duration:.2f}s"
             )
 
-    def _cleanup_frames(self, cutoff_timestamp: float, devices: list[tuple[str, str]]) -> None:
+    async def _cleanup_frames(
+        self, cutoff_timestamp: float, devices: list[tuple[str, str]]
+    ) -> None:
         """
         Clean up old source frames.
 
@@ -209,6 +227,7 @@ class CleanupService:
 
         for client_id, device_id in devices:
             deleted_count += self._delete_old_frames(client_id, device_id, cutoff_timestamp)
+            await asyncio.sleep(0)
 
         if deleted_count > 0:
             logger.debug(f"Cleaned up {deleted_count} old source frames")
@@ -222,16 +241,18 @@ class CleanupService:
         """
         deleted_count = 0
 
-        for pattern in ("*.jpg", "*.jpeg", "*.png"):
-            for file_info in self.storage.list_files(
-                client_id, device_id, "frames", pattern=pattern
-            ):
-                try:
-                    if file_info.mtime < cutoff_timestamp and self.storage.delete_file(
-                        client_id, device_id, f"frames/{file_info.name}"
-                    ):
-                        deleted_count += 1
-                except Exception as e:
-                    logger.error(f"Error deleting frame {file_info.name}: {e}")
+        # One listing, filtered here. list_files enumerates the whole directory
+        # server-side whatever the pattern, so a pattern per extension would
+        # bill the same listing three times.
+        for file_info in self.storage.list_files(client_id, device_id, "frames"):
+            if not file_info.name.endswith(FRAME_SUFFIXES):
+                continue
+            try:
+                if file_info.mtime < cutoff_timestamp and self.storage.delete_file(
+                    client_id, device_id, f"frames/{file_info.name}"
+                ):
+                    deleted_count += 1
+            except Exception as e:
+                logger.error(f"Error deleting frame {file_info.name}: {e}")
 
         return deleted_count

@@ -118,15 +118,29 @@ class TestShutdown:
         service.cleanup_interval_seconds = 3600
 
         task = asyncio.create_task(service.run())
-        for _ in range(50):
-            await asyncio.sleep(0)
-            if service._stop_event is not None and service.running:
+        for _ in range(200):
+            if service.running:
                 break
+            await asyncio.sleep(0.01)
+        assert service.running, "run() never armed; the rest of this test proves nothing"
 
         await service.stop()
 
         # Fails by timing out if run() is still sitting in the interval wait.
         await asyncio.wait_for(task, timeout=2)
+        assert service.running is False
+
+    async def test_stop_before_run_never_starts_a_cycle(self, storage):
+        """A stop that lands before run() arms must not leave a spinning loop."""
+        service = CleanupService(storage=storage)
+        service.cleanup_interval_seconds = 3600
+
+        await service.stop()
+
+        # The wait returns instantly on an already-set event, so a loop entered
+        # here would spin without delay. Timing out is the failure.
+        await asyncio.wait_for(service.run(), timeout=2)
+        assert storage.scan_count == 0
         assert service.running is False
 
 

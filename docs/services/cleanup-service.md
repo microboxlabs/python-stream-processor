@@ -9,7 +9,11 @@ Removes old HLS segments and source frames beyond the retention window.
 - HLS segments older than `PROCESSING_RETENTION_HOURS`
 - Source frames older than retention period
 - Redis playlist metadata (if enabled)
-- Stale temp files from the GCS backend (older than 10 minutes)
+
+Each cycle also calls `cleanup_temp_files` on its own storage backend. On GCS
+that sweep finds nothing today: every `GcsStorageBackend` gets a private
+`mkdtemp()` directory, and the downloads live in the HLS generator's separate
+instance. Pruning those needs one shared backend.
 
 ## Schedule
 
