@@ -59,6 +59,7 @@ class ProcessingConfig(BaseSettings):
     retention_hours: int = Field(default=24, description="Hours of video to retain")
     cleanup_interval_seconds: int = Field(
         default=3600,
+        gt=0,
         description=(
             "Seconds between cleanup cycles. Each cycle scans storage, so on GCS "
             "the interval sets the recurring listing cost. Keep it well under "

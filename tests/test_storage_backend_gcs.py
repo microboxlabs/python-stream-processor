@@ -63,6 +63,23 @@ class TestListAllDevices:
         assert costs[0] == costs[1] == 3
         assert len(large.objects) > 1000  # would have paginated under the old code
 
+    def test_a_level_over_one_page_of_prefixes_costs_more(self):
+        """GCS counts prefixes toward the page size, so 1 + N_clients is a floor."""
+        objects = {
+            f"client_ids/client-0/device_id/device-{d:05d}/hls/segments/seg_000001.ts"
+            for d in range(2500)
+        }
+        bucket = FakeBucket("b", dict.fromkeys(objects, b"x"))
+        backend = GcsStorageBackend(bucket_name="b")
+        backend._client = FakeGcsClient(bucket, page_size=1000)
+        backend._bucket = bucket
+
+        pairs = list(backend.list_all_devices())
+
+        assert len(pairs) == 2500
+        # 1 page for client_ids/ + 3 pages for 2500 device prefixes.
+        assert bucket.class_a_ops == 4
+
     def test_ignores_objects_outside_the_expected_layout(self, gcs):
         backend, bucket = gcs
         bucket.objects["client_ids/stray-file.txt"] = b"x"

@@ -5,8 +5,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from stream_processor.config.settings import settings
+from stream_processor.config.settings import ProcessingConfig, settings
 from stream_processor.service.cleanup_service import CleanupService
 from stream_processor.service.storage_backend import FileInfo, StorageBackend
 
@@ -14,7 +15,7 @@ from stream_processor.service.storage_backend import FileInfo, StorageBackend
 class CountingStorage(StorageBackend):
     """In-memory backend that records how often the device list is scanned."""
 
-    def __init__(self, files: dict[tuple[str, str], dict[str, FileInfo]] | None = None):
+    def __init__(self, files: dict[tuple[str, str], dict[str, list[FileInfo]]] | None = None):
         self.files = files or {}
         self.scan_count = 0
         self.deleted: list[tuple[str, str, str]] = []
@@ -96,17 +97,27 @@ class TestScanCost:
         assert ("client-b", "device-2", "hls/segments/seg_000002.ts") not in storage.deleted
 
 
+@pytest.fixture
+def defaults(monkeypatch):
+    """ProcessingConfig with no env or .env override, so defaults are the defaults."""
+    monkeypatch.delenv("PROCESSING_CLEANUP_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("PROCESSING_RETENTION_HOURS", raising=False)
+    return ProcessingConfig(_env_file=None)
+
+
 class TestInterval:
     def test_interval_comes_from_settings(self, storage):
         service = CleanupService(storage=storage)
 
         assert service.cleanup_interval_seconds == settings.processing.cleanup_interval_seconds
 
-    def test_default_interval_is_one_hour(self):
-        assert settings.processing.cleanup_interval_seconds == 3600
+    def test_default_interval_is_one_hour(self, defaults):
+        assert defaults.cleanup_interval_seconds == 3600
 
-    def test_interval_stays_below_the_retention_window(self):
-        assert (
-            settings.processing.cleanup_interval_seconds
-            < settings.processing.retention_hours * 3600
-        )
+    def test_default_interval_stays_below_the_retention_window(self, defaults):
+        assert defaults.cleanup_interval_seconds < defaults.retention_hours * 3600
+
+    def test_interval_must_be_positive(self):
+        """A zero interval would scan storage continuously."""
+        with pytest.raises(ValidationError):
+            ProcessingConfig(_env_file=None, cleanup_interval_seconds=0)

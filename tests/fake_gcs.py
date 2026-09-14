@@ -82,23 +82,23 @@ class FakeListIterator:
 
     def __init__(self, bucket: FakeBucket, names: list[str], prefixes: list[str], page_size: int):
         self._bucket = bucket
-        self._names = names
-        self._all_prefixes = prefixes
+        # GCS counts objects and collapsed prefixes together toward the page
+        # size, and accumulates prefixes across pages. A listing that returns
+        # more than page_size prefixes therefore costs more than one Class A op.
+        self._items = [("name", n) for n in names] + [("prefix", p) for p in prefixes]
         self._page_size = page_size
         self.prefixes: set[str] = set()
 
     @property
     def pages(self):
         chunks = [
-            self._names[i : i + self._page_size]
-            for i in range(0, len(self._names), self._page_size)
+            self._items[i : i + self._page_size]
+            for i in range(0, len(self._items), self._page_size)
         ] or [[]]
-        for index, chunk in enumerate(chunks):
+        for chunk in chunks:
             self._bucket.class_a_ops += 1
-            # The real API returns prefixes alongside the first page of results.
-            if index == 0:
-                self.prefixes.update(self._all_prefixes)
-            yield [FakeBlob(self._bucket, name) for name in chunk]
+            self.prefixes.update(value for kind, value in chunk if kind == "prefix")
+            yield [FakeBlob(self._bucket, value) for kind, value in chunk if kind == "name"]
 
     def __iter__(self):
         for page in self.pages:

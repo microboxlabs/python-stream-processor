@@ -6,6 +6,10 @@ Read-only. Counts the listings `GcsStorageBackend.list_all_devices()` issues —
 one listing is one Class A operation, plus one more per 1000 results in it —
 and projects the daily cost at the configured cleanup interval.
 
+Listings, not pages: a listing that returns over 1000 prefixes costs more than
+the one op counted here. Compare against the bucket's real client and device
+counts when either is near a multiple of 1000.
+
 Usage:
     python scripts/gcs_scan_cost.py                    # uses STORAGE_GCS_BUCKET
     python scripts/gcs_scan_cost.py --bucket my-bucket --project my-project
@@ -54,25 +58,31 @@ def main() -> int:
         print("no bucket: pass --bucket or set STORAGE_GCS_BUCKET", file=sys.stderr)
         return 2
 
+    interval: int = args.interval
+    if interval <= 0:
+        print("--interval must be greater than zero", file=sys.stderr)
+        return 2
+
     backend = CountingBackend(bucket, args.project)
 
     started = time.time()
     devices = list(backend.list_all_devices())
     elapsed = time.time() - started
 
-    scans_per_day = 86400 / args.interval
+    scans_per_day = 86400 / interval
     ops_per_day = backend.listings * scans_per_day
 
     print(f"bucket:            {bucket}")
     print(f"devices found:     {len(devices)}")
     print(f"class A ops/scan:  {backend.listings}")
     print(f"scan duration:     {elapsed:.1f}s")
-    print(f"cleanup interval:  {args.interval}s ({scans_per_day:.0f} scans/day)")
+    print(f"cleanup interval:  {interval}s ({scans_per_day:.0f} scans/day)")
     print(f"class A ops/day:   {ops_per_day:,.0f}")
     print(f"projected USD/day: {ops_per_day / 1000 * CLASS_A_USD_PER_1000:.2f}")
     print()
-    print("Expect 1 listing for client_ids/ plus one per client. An op count in")
-    print("the thousands means the scan is enumerating objects again.")
+    print("Expect one listing for client_ids/ plus one per client, and one more")
+    print("op per 1000 prefixes in any single listing. An op count in the")
+    print("thousands means the scan is enumerating objects again.")
     return 0
 
 

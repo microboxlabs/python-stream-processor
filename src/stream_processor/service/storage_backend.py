@@ -552,8 +552,10 @@ class GcsStorageBackend(StorageBackend):
         List all client/device pairs in GCS.
 
         Walks two prefix levels (client_ids/{client_id}/device_id/{device_id}/)
-        rather than enumerating every object under client_ids/. Costs
-        1 + N_clients Class A operations, independent of objects stored.
+        rather than enumerating every object under client_ids/. Costs one
+        Class A operation per prefix page: 1 + N_clients while each level fits
+        in a page, more once a level exceeds 1000 prefixes. Either way it does
+        not depend on how many objects are stored.
         """
         for client_prefix in self._list_prefixes("client_ids/"):
             # client_prefix is "client_ids/{client_id}/"
