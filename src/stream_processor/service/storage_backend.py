@@ -8,6 +8,7 @@ Mirrors the Java implementation for consistency.
 import re
 import tempfile
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -541,11 +542,11 @@ class GcsStorageBackend(StorageBackend):
         """
         iterator = self.client.list_blobs(self.bucket_name, prefix=prefix, delimiter="/")
 
-        prefixes: set[str] = set()
-        for _page in self._walk_pages(iterator):
-            prefixes.update(iterator.prefixes)
+        # prefixes accumulates across pages, so walk them all and read it once.
+        # Re-reading it per page would re-copy every earlier page's prefixes.
+        deque(self._walk_pages(iterator), maxlen=0)
 
-        return sorted(prefixes)
+        return sorted(iterator.prefixes)
 
     def _walk_pages(self, iterator):
         """

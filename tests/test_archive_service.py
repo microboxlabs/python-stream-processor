@@ -32,6 +32,7 @@ def service_and_pool():
             "device_id": "device-1",
             "session_id": "sess-ready",
             "archive_path": "archives/sess-ready",
+            "status": "ready",
         },
         {
             "id": 2,
@@ -39,6 +40,7 @@ def service_and_pool():
             "device_id": "device-1",
             "session_id": "sess-failed",
             "archive_path": "archives/sess-failed",
+            "status": "failed",
         },
     ]
     storage = CountingStorage()
@@ -75,3 +77,22 @@ class TestCleanupExpiredArchives:
 
         assert [args[0] for _, args in pool.executed] == [1, 2]
         assert all("SET status = 'deleted'" in query for query, _ in pool.executed)
+
+    async def test_keeps_a_failed_archive_that_holds_a_playlist(self, service_and_pool):
+        """A finished archive whose metadata write failed is recoverable, not garbage."""
+        service, pool, storage = service_and_pool
+        storage.existing.add(("client-a", "device-1", "archives/sess-failed/playlist.m3u8"))
+
+        deleted = await service.cleanup_expired_archives()
+
+        assert deleted == 1
+        assert not any("sess-failed" in path for _, _, path in storage.deleted)
+        assert [args[0] for _, args in pool.executed] == [1]
+
+    async def test_still_reaps_a_failed_archive_with_no_playlist(self, service_and_pool):
+        """No playlist means _archive_session died partway; that is the leak."""
+        service, _, storage = service_and_pool
+
+        await service.cleanup_expired_archives()
+
+        assert ("client-a", "device-1", "archives/sess-failed/playlist.m3u8") in storage.deleted

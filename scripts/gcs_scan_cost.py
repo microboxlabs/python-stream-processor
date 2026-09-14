@@ -72,15 +72,20 @@ def main() -> int:
 
     print(f"bucket:            {bucket}")
     print(f"devices found:     {len(devices)}")
-    print(f"class A ops/scan:  {backend.pages}")
+    print(f"class A ops/scan:  {backend.pages}  (device scan only)")
     print(f"scan duration:     {elapsed:.1f}s")
     print(f"cleanup interval:  {interval}s ({scans_per_day:.0f} scans/day)")
-    print(f"class A ops/day:   {ops_per_day:,.0f}")
+    print(f"class A ops/day:   {ops_per_day:,.0f}  (device scan only)")
     print(f"projected USD/day: {ops_per_day / 1000 * CLASS_A_USD_PER_1000:.2f}")
     print()
     print("Expect one listing for client_ids/ plus one per client, and one more")
     print("op per 1000 prefixes in any single listing. An op count in the")
     print("thousands means the scan is enumerating objects again.")
+    print()
+    print("This is the device scan alone. A full cleanup cycle also lists each")
+    print(f"device's segments and frames — about {len(devices) * 2} more ops per cycle here,")
+    print("more where a device directory exceeds 1000 objects. Add those before")
+    print("comparing against a billing total.")
     return 0
 
 

@@ -1,5 +1,7 @@
 """Tests for GcsStorageBackend operation costs."""
 
+import shutil
+
 import pytest
 
 from stream_processor.service.storage_backend import GcsStorageBackend
@@ -18,14 +20,30 @@ def build_objects(clients: int, devices_per_client: int, segments_per_device: in
     return objects
 
 
+def make_backend(bucket: FakeBucket, page_size: int = 1000) -> GcsStorageBackend:
+    """A GcsStorageBackend wired to a fake client. Caller removes its temp dir."""
+    backend = GcsStorageBackend(bucket_name=bucket.name)
+    backend._client = FakeGcsClient(bucket, page_size=page_size)
+    backend._bucket = bucket
+    return backend
+
+
 @pytest.fixture
-def gcs(request):
+def temp_dirs():
+    """Remove the mkdtemp() directory every GcsStorageBackend creates."""
+    backends: list[GcsStorageBackend] = []
+    yield backends
+    for backend in backends:
+        shutil.rmtree(backend._temp_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def gcs(request, temp_dirs):
     """A GcsStorageBackend wired to a fake client. Param: the object map."""
     objects = getattr(request, "param", build_objects(3, 4, 10))
     bucket = FakeBucket("test-bucket", objects)
-    backend = GcsStorageBackend(bucket_name="test-bucket")
-    backend._client = FakeGcsClient(bucket, page_size=1000)
-    backend._bucket = bucket
+    backend = make_backend(bucket)
+    temp_dirs.append(backend)
     return backend, bucket
 
 
@@ -47,32 +65,30 @@ class TestListAllDevices:
         # 1 listing for client_ids/ + 1 per client for its device_id/ level.
         assert bucket.class_a_ops == 1 + 3
 
-    def test_scan_cost_does_not_grow_with_object_count(self):
+    def test_scan_cost_does_not_grow_with_object_count(self, temp_dirs):
         """2,300 pages of objects used to mean 2,300 Class A ops per scan."""
         small = FakeBucket("b", build_objects(2, 2, 5))
         large = FakeBucket("b", build_objects(2, 2, 5000))
 
         costs = []
         for bucket in (small, large):
-            backend = GcsStorageBackend(bucket_name="b")
-            backend._client = FakeGcsClient(bucket, page_size=1000)
-            backend._bucket = bucket
+            backend = make_backend(bucket)
+            temp_dirs.append(backend)
             list(backend.list_all_devices())
             costs.append(bucket.class_a_ops)
 
         assert costs[0] == costs[1] == 3
         assert len(large.objects) > 1000  # would have paginated under the old code
 
-    def test_a_level_over_one_page_of_prefixes_costs_more(self):
+    def test_a_level_over_one_page_of_prefixes_costs_more(self, temp_dirs):
         """GCS counts prefixes toward the page size, so 1 + N_clients is a floor."""
         objects = {
             f"client_ids/client-0/device_id/device-{d:05d}/hls/segments/seg_000001.ts"
             for d in range(2500)
         }
         bucket = FakeBucket("b", dict.fromkeys(objects, b"x"))
-        backend = GcsStorageBackend(bucket_name="b")
-        backend._client = FakeGcsClient(bucket, page_size=1000)
-        backend._bucket = bucket
+        backend = make_backend(bucket)
+        temp_dirs.append(backend)
 
         pairs = list(backend.list_all_devices())
 
@@ -90,11 +106,10 @@ class TestListAllDevices:
         assert ("stray-file.txt", "") not in pairs
         assert len(pairs) == 12
 
-    def test_empty_bucket_yields_nothing(self):
+    def test_empty_bucket_yields_nothing(self, temp_dirs):
         bucket = FakeBucket("b", {})
-        backend = GcsStorageBackend(bucket_name="b")
-        backend._client = FakeGcsClient(bucket)
-        backend._bucket = bucket
+        backend = make_backend(bucket)
+        temp_dirs.append(backend)
 
         assert list(backend.list_all_devices()) == []
 

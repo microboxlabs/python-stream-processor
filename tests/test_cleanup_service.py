@@ -21,6 +21,8 @@ class CountingStorage(StorageBackend):
         self.files = files or {}
         self.scan_count = 0
         self.deleted: list[tuple[str, str, str]] = []
+        # Subpaths file_exists() should report as present.
+        self.existing: set[tuple[str, str, str]] = set()
 
     def get_storage_type(self) -> str:
         return "counting"
@@ -38,7 +40,7 @@ class CountingStorage(StorageBackend):
         return None
 
     def file_exists(self, client_id, device_id, subpath) -> bool:
-        return False
+        return (client_id, device_id, subpath) in self.existing
 
     def delete_file(self, client_id, device_id, subpath) -> bool:
         self.deleted.append((client_id, device_id, subpath))

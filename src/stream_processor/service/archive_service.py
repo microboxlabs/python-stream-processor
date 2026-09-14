@@ -416,7 +416,7 @@ class ArchiveService:
         # 'failed' rows are included: _mark_archive_failed leaves partial
         # segments in storage and nothing else deletes them.
         rows = await pool.fetch("""
-            SELECT id, client_id, device_id, session_id, archive_path
+            SELECT id, client_id, device_id, session_id, archive_path, status
             FROM deferred_transmissions
             WHERE status IN ('ready', 'failed') AND expires_at < CURRENT_TIMESTAMP
             """)
@@ -426,6 +426,14 @@ class ArchiveService:
         for row in rows:
             try:
                 archive_path = row["archive_path"]
+
+                if row["status"] == "failed" and self._archive_looks_complete(row):
+                    logger.warning(
+                        f"Keeping expired failed archive {row['session_id']}: "
+                        f"its playlist exists, so the segments are intact and only "
+                        f"the metadata write failed. Repair it or delete it by hand."
+                    )
+                    continue
 
                 # Delete segments
                 for file_info in self.storage.list_files(
@@ -464,6 +472,19 @@ class ArchiveService:
                 logger.error(f"Error deleting archive {row['session_id']}: {e}")
 
         return deleted_count
+
+    def _archive_looks_complete(self, row) -> bool:
+        """
+        Whether a 'failed' archive actually holds a finished recording.
+
+        _archive_session writes the segments and the VOD playlist before it
+        writes the database row, so a failure in that last step leaves a
+        complete archive marked 'failed'. The playlist is the marker: it is
+        written last, and the repair scripts need it.
+        """
+        return self.storage.file_exists(
+            row["client_id"], row["device_id"], f"{row['archive_path']}/playlist.m3u8"
+        )
 
     async def close(self) -> None:
         """Close database connections."""
