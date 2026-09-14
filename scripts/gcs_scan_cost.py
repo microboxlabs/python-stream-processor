@@ -2,8 +2,8 @@
 """
 Measure the Class A cost of one device scan against a real GCS bucket.
 
-Read-only. Counts the list pages fetched by
-`GcsStorageBackend.list_all_devices()` — one page is one Class A operation —
+Read-only. Counts the listings `GcsStorageBackend.list_all_devices()` issues —
+one listing is one Class A operation, plus one more per 1000 results in it —
 and projects the daily cost at the configured cleanup interval.
 
 Usage:
@@ -25,37 +25,16 @@ from stream_processor.service.storage_backend import GcsStorageBackend  # noqa: 
 CLASS_A_USD_PER_1000 = 0.005
 
 
-class CountingIterator:
-    """Wraps a list_blobs iterator and counts the pages actually fetched."""
+class CountingBackend(GcsStorageBackend):
+    """A GCS backend that records how many listings a scan issues."""
 
-    def __init__(self, inner, counter):
-        self._inner = inner
-        self._counter = counter
+    def __init__(self, bucket_name: str, project_id: str | None = None):
+        super().__init__(bucket_name, project_id)
+        self.listings = 0
 
-    @property
-    def pages(self):
-        for page in self._inner.pages:
-            self._counter["pages"] += 1
-            yield page
-
-    def __iter__(self):
-        for page in self.pages:
-            yield from page
-
-    def __getattr__(self, name):
-        return getattr(self._inner, name)
-
-
-def count_pages(counter: dict) -> None:
-    """Wrap Client.list_blobs so every page it fetches lands in counter."""
-    from google.cloud import storage
-
-    original = storage.Client.list_blobs
-
-    def counting_list_blobs(self, *args, **kwargs):
-        return CountingIterator(original(self, *args, **kwargs), counter)
-
-    storage.Client.list_blobs = counting_list_blobs
+    def _list_prefixes(self, prefix: str) -> list[str]:
+        self.listings += 1
+        return super()._list_prefixes(prefix)
 
 
 def main() -> int:
@@ -75,29 +54,25 @@ def main() -> int:
         print("no bucket: pass --bucket or set STORAGE_GCS_BUCKET", file=sys.stderr)
         return 2
 
-    counter = {"pages": 0}
-    count_pages(counter)
-
-    backend = GcsStorageBackend(bucket_name=bucket, project_id=args.project)
+    backend = CountingBackend(bucket, args.project)
 
     started = time.time()
     devices = list(backend.list_all_devices())
     elapsed = time.time() - started
 
     scans_per_day = 86400 / args.interval
-    ops_per_day = counter["pages"] * scans_per_day
+    ops_per_day = backend.listings * scans_per_day
 
     print(f"bucket:            {bucket}")
     print(f"devices found:     {len(devices)}")
-    print(f"class A ops/scan:  {counter['pages']}")
+    print(f"class A ops/scan:  {backend.listings}")
     print(f"scan duration:     {elapsed:.1f}s")
     print(f"cleanup interval:  {args.interval}s ({scans_per_day:.0f} scans/day)")
     print(f"class A ops/day:   {ops_per_day:,.0f}")
     print(f"projected USD/day: {ops_per_day / 1000 * CLASS_A_USD_PER_1000:.2f}")
     print()
-    print("The cleanup service runs one scan per cycle. Two scans per cycle, or")
-    print("an op count that tracks object count rather than client count, means")
-    print("the prefix walk regressed.")
+    print("Expect 1 listing for client_ids/ plus one per client. An op count in")
+    print("the thousands means the scan is enumerating objects again.")
     return 0
 
 
