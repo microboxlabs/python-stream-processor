@@ -8,9 +8,11 @@ Mirrors the Java implementation for consistency.
 import re
 import tempfile
 from abc import ABC, abstractmethod
+from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..utils.logger import get_logger
 
@@ -360,14 +362,13 @@ class GcsStorageBackend(StorageBackend):
             bucket_name: GCS bucket name
             project_id: Optional GCP project ID (uses ADC if not specified)
         """
-        from google.cloud import storage
-
         self.bucket_name = bucket_name
         self.project_id = project_id
 
-        # Initialize client lazily
-        self._client: storage.Client | None = None
-        self._bucket: storage.Bucket | None = None
+        # Initialize client lazily; google.cloud is imported on first use.
+        # Any, not storage.Client: the library ships no type stubs.
+        self._client: Any = None
+        self._bucket: Any = None
 
         # Temp directory for local operations (FFmpeg compatibility)
         self._temp_dir = Path(tempfile.mkdtemp(prefix="stream_processor_gcs_"))
@@ -377,21 +378,25 @@ class GcsStorageBackend(StorageBackend):
     @property
     def client(self):
         """Lazy-load GCS client."""
-        if self._client is None:
+        client = self._client
+        if client is None:
             from google.cloud import storage
 
             if self.project_id:
-                self._client = storage.Client(project=self.project_id)
+                client = storage.Client(project=self.project_id)
             else:
-                self._client = storage.Client()
-        return self._client
+                client = storage.Client()
+            self._client = client
+        return client
 
     @property
     def bucket(self):
         """Lazy-load bucket reference."""
-        if self._bucket is None:
-            self._bucket = self.client.bucket(self.bucket_name)
-        return self._bucket
+        bucket = self._bucket
+        if bucket is None:
+            bucket = self.client.bucket(self.bucket_name)
+            self._bucket = bucket
+        return bucket
 
     def get_storage_type(self) -> str:
         return "gcs"
@@ -450,13 +455,16 @@ class GcsStorageBackend(StorageBackend):
 
     def read_file(self, client_id: str, device_id: str, subpath: str) -> bytes | None:
         """Read file from GCS."""
+        from google.api_core.exceptions import NotFound
+
         blob_path = self._get_blob_path(client_id, device_id, subpath)
         blob = self.bucket.blob(blob_path)
 
-        if not blob.exists():
+        # Download straight away: exists() would be a second billable Class B op.
+        try:
+            result: bytes = blob.download_as_bytes()
+        except NotFound:
             return None
-
-        result: bytes = blob.download_as_bytes()
         return result
 
     def file_exists(self, client_id: str, device_id: str, subpath: str) -> bool:
@@ -468,23 +476,28 @@ class GcsStorageBackend(StorageBackend):
 
     def delete_file(self, client_id: str, device_id: str, subpath: str) -> bool:
         """Delete file from GCS."""
+        from google.api_core.exceptions import NotFound
+
         blob_path = self._get_blob_path(client_id, device_id, subpath)
         blob = self.bucket.blob(blob_path)
 
-        if blob.exists():
+        # delete() is free; exists() is a billable Class B op. Delete and catch.
+        try:
             blob.delete()
-            return True
-        return False
+        except NotFound:
+            return False
+        return True
 
     def get_file_info(self, client_id: str, device_id: str, subpath: str) -> FileInfo | None:
         """Get file metadata from GCS."""
         blob_path = self._get_blob_path(client_id, device_id, subpath)
-        blob = self.bucket.blob(blob_path)
 
-        if not blob.exists():
+        # get_blob() fetches metadata in one op and returns None when missing;
+        # exists() + reload() would cost two.
+        blob = self.bucket.get_blob(blob_path)
+        if blob is None:
             return None
 
-        blob.reload()  # Fetch metadata
         return FileInfo(
             name=blob_path.split("/")[-1],
             size=blob.size or 0,
@@ -519,19 +532,51 @@ class GcsStorageBackend(StorageBackend):
                 mtime=blob.updated.timestamp() if blob.updated else 0,
             )
 
-    def list_all_devices(self) -> Iterator[tuple[str, str]]:
-        """List all client/device pairs in GCS."""
-        # List blobs with prefix to find unique client_id/device_id combinations
-        seen: set[tuple[str, str]] = set()
+    def _list_prefixes(self, prefix: str) -> list[str]:
+        """
+        List the immediate "subdirectory" prefixes under a prefix.
 
-        for blob in self.client.list_blobs(self.bucket_name, prefix="client_ids/"):
-            # Parse path: client_ids/{client_id}/device_id/{device_id}/...
-            parts = blob.name.split("/")
-            if len(parts) >= 4 and parts[0] == "client_ids" and parts[2] == "device_id":
-                pair = (parts[1], parts[3])
-                if pair not in seen:
-                    seen.add(pair)
-                    yield pair
+        delimiter="/" makes GCS collapse everything below one level into a
+        prefix. The iterator exposes prefixes per page, so every page has to be
+        walked to collect them all.
+        """
+        iterator = self.client.list_blobs(self.bucket_name, prefix=prefix, delimiter="/")
+
+        # prefixes accumulates across pages, so walk them all and read it once.
+        # Re-reading it per page would re-copy every earlier page's prefixes.
+        deque(self._walk_pages(iterator), maxlen=0)
+
+        return sorted(iterator.prefixes)
+
+    def _walk_pages(self, iterator):
+        """
+        Yield each page of a listing. One page is one Class A operation.
+
+        A seam for tooling that meters scan cost; see scripts/gcs_scan_cost.py.
+        """
+        return iterator.pages
+
+    def list_all_devices(self) -> Iterator[tuple[str, str]]:
+        """
+        List all client/device pairs in GCS.
+
+        Walks two prefix levels (client_ids/{client_id}/device_id/{device_id}/)
+        rather than enumerating every object under client_ids/. Costs one
+        Class A operation per prefix page: 1 + N_clients while each level fits
+        in a page, more once a level exceeds 1000 prefixes. Either way it does
+        not depend on how many objects are stored.
+        """
+        for client_prefix in self._list_prefixes("client_ids/"):
+            # client_prefix is "client_ids/{client_id}/"
+            client_id = client_prefix.rstrip("/").split("/")[-1]
+            if not client_id:
+                continue
+
+            for device_prefix in self._list_prefixes(f"{client_prefix}device_id/"):
+                # device_prefix is "client_ids/{client_id}/device_id/{device_id}/"
+                device_id = device_prefix.rstrip("/").split("/")[-1]
+                if device_id:
+                    yield (client_id, device_id)
 
     def get_local_path(self, client_id: str, device_id: str, subpath: str) -> Path | None:
         """

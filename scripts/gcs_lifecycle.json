@@ -1,0 +1,20 @@
+{
+  "lifecycle": {
+    "rule": [
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 8,
+          "matchesSuffix": [".ts"]
+        }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": {
+          "age": 2,
+          "matchesSuffix": [".jpg", ".jpeg", ".png"]
+        }
+      }
+    ]
+  }
+}

@@ -6,6 +6,7 @@ Supports both filesystem and GCS storage backends.
 """
 
 import asyncio
+import contextlib
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -16,6 +17,10 @@ from .redis_playlist_store import RedisPlaylistStore
 from .storage_backend import StorageBackend, create_storage_backend
 
 logger = get_logger(__name__)
+
+# Source frame extensions written by the encoder, matched case-sensitively as
+# the previous glob patterns were.
+FRAME_SUFFIXES = (".jpg", ".jpeg", ".png")
 
 
 class CleanupService:
@@ -48,8 +53,11 @@ class CleanupService:
                 gcs_project_id=self.storage_config.gcs_project_id,
             )
 
-        # Run cleanup every 5 minutes
-        self.cleanup_interval_seconds = 300
+        self.cleanup_interval_seconds = settings.processing.cleanup_interval_seconds
+
+        # Set by stop() to cut the inter-cycle wait short, so shutdown does not
+        # have to outlast a whole interval.
+        self._stop_event = asyncio.Event()
 
         # Redis playlist store for removing segment metadata during cleanup
         self.playlist_store: RedisPlaylistStore | None = None
@@ -74,25 +82,42 @@ class CleanupService:
         logger.info(f"Redis playlist store: {'enabled' if self.playlist_store else 'disabled'}")
         logger.info("=" * 80)
 
+        if self._stop_event.is_set():
+            logger.info("Cleanup service stopped before it started")
+            return
+
         # Connect to Redis if playlist store is configured
         if self.playlist_store:
             await self.playlist_store.connect()
 
+        # connect() awaits, so stop() can land inside it. Re-check: entering the
+        # loop with the event already set would spin, since the wait below
+        # returns instantly.
+        if self._stop_event.is_set():
+            logger.info("Cleanup service stopped before its first cycle")
+            return
+
         self.running = True
 
-        while self.running:
+        while not self._stop_event.is_set():
             try:
                 await self._run_cleanup()
             except Exception as e:
                 logger.error(f"Cleanup error: {e}", exc_info=True)
 
-            # Wait for next cleanup cycle
-            await asyncio.sleep(self.cleanup_interval_seconds)
+            # Wait for the next cycle, or return as soon as stop() fires.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self.cleanup_interval_seconds
+                )
+
+        self.running = False
 
     async def stop(self) -> None:
         """Stop the cleanup service."""
         logger.info("Stopping cleanup service...")
         self.running = False
+        self._stop_event.set()
 
         # Close Redis playlist store
         if self.playlist_store:
@@ -118,27 +143,20 @@ class CleanupService:
         total_deleted = 0
         total_bytes_freed = 0
 
-        # Iterate through all devices using the storage backend
-        for client_id, device_id in self.storage.list_all_devices():
+        # Materialize the device list once: on GCS every scan is a billable
+        # listing, and this cycle needs the same list twice.
+        devices = list(self.storage.list_all_devices())
+
+        for client_id, device_id in devices:
+            if self._stop_event.is_set():
+                logger.info("Cleanup cycle interrupted by shutdown")
+                break
+
             state_key = f"{client_id}:{device_id}"
 
-            # Clean up old segments
-            deleted_count = 0
-            bytes_freed = 0
-
-            for file_info in self.storage.list_files(
-                client_id, device_id, "hls/segments", pattern="seg_*.ts"
-            ):
-                try:
-                    # Check file modification time
-                    if file_info.mtime < cutoff_timestamp:
-                        bytes_freed += file_info.size
-                        if self.storage.delete_file(
-                            client_id, device_id, f"hls/segments/{file_info.name}"
-                        ):
-                            deleted_count += 1
-                except Exception as e:
-                    logger.error(f"Error deleting segment {file_info.name}: {e}")
+            deleted_count, bytes_freed = await self._delete_old_segments(
+                client_id, device_id, cutoff_timestamp
+            )
 
             if deleted_count > 0:
                 segments_deleted_total.labels(device_id=state_key).inc(deleted_count)
@@ -164,7 +182,7 @@ class CleanupService:
             total_bytes_freed += bytes_freed
 
         # Also clean up old source frames
-        await self._cleanup_frames(cutoff_timestamp)
+        await self._cleanup_frames(cutoff_timestamp, devices)
 
         # Clean up stale temporary files (GCS backend downloads/intermediates)
         temp_removed = self.storage.cleanup_temp_files(max_age_seconds=600)
@@ -180,33 +198,92 @@ class CleanupService:
                 f"{total_bytes_freed / 1024 / 1024:.2f} MB freed in {duration:.2f}s"
             )
 
-    async def _cleanup_frames(self, cutoff_timestamp: float) -> None:
+    async def _delete_old_segments(
+        self, client_id: str, device_id: str, cutoff_timestamp: float
+    ) -> tuple[int, int]:
+        """
+        Delete one device's HLS segments older than the cutoff.
+
+        Returns:
+            (segments deleted, bytes freed)
+        """
+        deleted_count = 0
+        bytes_freed = 0
+
+        for file_info in self.storage.list_files(
+            client_id, device_id, "hls/segments", pattern="seg_*.ts"
+        ):
+            if self._stop_event.is_set():
+                break
+            try:
+                if file_info.mtime < cutoff_timestamp:
+                    bytes_freed += file_info.size
+                    if self.storage.delete_file(
+                        client_id, device_id, f"hls/segments/{file_info.name}"
+                    ):
+                        deleted_count += 1
+            except Exception as e:
+                logger.error(f"Error deleting segment {file_info.name}: {e}")
+
+            # Each delete is a blocking round trip and a backlogged device can
+            # hold thousands. Yield so the frame consumer keeps running.
+            await asyncio.sleep(0)
+
+        return deleted_count, bytes_freed
+
+    async def _cleanup_frames(
+        self, cutoff_timestamp: float, devices: list[tuple[str, str]]
+    ) -> None:
         """
         Clean up old source frames.
 
         Frames are deleted after they've been encoded into segments
         and are older than retention period.
 
+        Args:
+            cutoff_timestamp: Delete frames modified before this Unix timestamp
+            devices: Client/device pairs from the caller's single storage scan
+
         Directory structure:
         {base_path}/client_ids/{client_id}/device_id/{device_id}/frames/
         """
         deleted_count = 0
 
-        # Iterate through all devices
-        for client_id, device_id in self.storage.list_all_devices():
-            # Clean up old frames (jpg and png)
-            for pattern in ["*.jpg", "*.jpeg", "*.png"]:
-                for file_info in self.storage.list_files(
-                    client_id, device_id, "frames", pattern=pattern
-                ):
-                    try:
-                        if file_info.mtime < cutoff_timestamp:
-                            if self.storage.delete_file(
-                                client_id, device_id, f"frames/{file_info.name}"
-                            ):
-                                deleted_count += 1
-                    except Exception as e:
-                        logger.error(f"Error deleting frame {file_info.name}: {e}")
+        for client_id, device_id in devices:
+            if self._stop_event.is_set():
+                break
+            deleted_count += await self._delete_old_frames(client_id, device_id, cutoff_timestamp)
 
         if deleted_count > 0:
             logger.debug(f"Cleaned up {deleted_count} old source frames")
+
+    async def _delete_old_frames(
+        self, client_id: str, device_id: str, cutoff_timestamp: float
+    ) -> int:
+        """
+        Delete one device's source frames older than the cutoff.
+
+        Returns:
+            Number of frames deleted
+        """
+        deleted_count = 0
+
+        # One listing, filtered here. list_files enumerates the whole directory
+        # server-side whatever the pattern, so a pattern per extension would
+        # bill the same listing three times.
+        for file_info in self.storage.list_files(client_id, device_id, "frames"):
+            if self._stop_event.is_set():
+                break
+            if not file_info.name.endswith(FRAME_SUFFIXES):
+                continue
+            try:
+                if file_info.mtime < cutoff_timestamp and self.storage.delete_file(
+                    client_id, device_id, f"frames/{file_info.name}"
+                ):
+                    deleted_count += 1
+            except Exception as e:
+                logger.error(f"Error deleting frame {file_info.name}: {e}")
+
+            await asyncio.sleep(0)
+
+        return deleted_count
