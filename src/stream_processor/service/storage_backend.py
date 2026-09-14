@@ -532,13 +532,16 @@ class GcsStorageBackend(StorageBackend):
         List the immediate "subdirectory" prefixes under a prefix.
 
         delimiter="/" makes GCS collapse everything below one level into a
-        prefix. Prefixes are only populated once the pages have been walked,
-        hence the explicit page loop.
+        prefix. The iterator exposes prefixes per page, so every page has to be
+        walked to collect them all.
         """
         iterator = self.client.list_blobs(self.bucket_name, prefix=prefix, delimiter="/")
-        for _ in iterator.pages:
-            pass
-        return sorted(iterator.prefixes)
+
+        prefixes: set[str] = set()
+        for _page in iterator.pages:
+            prefixes.update(iterator.prefixes)
+
+        return sorted(prefixes)
 
     def list_all_devices(self) -> Iterator[tuple[str, str]]:
         """

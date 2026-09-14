@@ -46,6 +46,18 @@ class CountingIterator:
         return getattr(self._inner, name)
 
 
+def count_pages(counter: dict) -> None:
+    """Wrap Client.list_blobs so every page it fetches lands in counter."""
+    from google.cloud import storage
+
+    original = storage.Client.list_blobs
+
+    def counting_list_blobs(self, *args, **kwargs):
+        return CountingIterator(original(self, *args, **kwargs), counter)
+
+    storage.Client.list_blobs = counting_list_blobs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", default=settings.storage.gcs_bucket)
@@ -58,16 +70,15 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.bucket:
-        parser.error("no bucket: pass --bucket or set STORAGE_GCS_BUCKET")
+    bucket: str | None = args.bucket
+    if not bucket:
+        print("no bucket: pass --bucket or set STORAGE_GCS_BUCKET", file=sys.stderr)
+        return 2
 
-    backend = GcsStorageBackend(bucket_name=args.bucket, project_id=args.project)
     counter = {"pages": 0}
+    count_pages(counter)
 
-    original_list_blobs = backend.client.list_blobs
-    backend.client.list_blobs = lambda *a, **kw: CountingIterator(
-        original_list_blobs(*a, **kw), counter
-    )
+    backend = GcsStorageBackend(bucket_name=bucket, project_id=args.project)
 
     started = time.time()
     devices = list(backend.list_all_devices())
@@ -76,7 +87,7 @@ def main() -> int:
     scans_per_day = 86400 / args.interval
     ops_per_day = counter["pages"] * scans_per_day
 
-    print(f"bucket:            {args.bucket}")
+    print(f"bucket:            {bucket}")
     print(f"devices found:     {len(devices)}")
     print(f"class A ops/scan:  {counter['pages']}")
     print(f"scan duration:     {elapsed:.1f}s")

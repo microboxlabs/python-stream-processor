@@ -166,7 +166,7 @@ class CleanupService:
             total_bytes_freed += bytes_freed
 
         # Also clean up old source frames
-        await self._cleanup_frames(cutoff_timestamp, devices)
+        self._cleanup_frames(cutoff_timestamp, devices)
 
         # Clean up stale temporary files (GCS backend downloads/intermediates)
         temp_removed = self.storage.cleanup_temp_files(max_age_seconds=600)
@@ -182,9 +182,7 @@ class CleanupService:
                 f"{total_bytes_freed / 1024 / 1024:.2f} MB freed in {duration:.2f}s"
             )
 
-    async def _cleanup_frames(
-        self, cutoff_timestamp: float, devices: list[tuple[str, str]]
-    ) -> None:
+    def _cleanup_frames(self, cutoff_timestamp: float, devices: list[tuple[str, str]]) -> None:
         """
         Clean up old source frames.
 
@@ -201,19 +199,30 @@ class CleanupService:
         deleted_count = 0
 
         for client_id, device_id in devices:
-            # Clean up old frames (jpg and png)
-            for pattern in ["*.jpg", "*.jpeg", "*.png"]:
-                for file_info in self.storage.list_files(
-                    client_id, device_id, "frames", pattern=pattern
-                ):
-                    try:
-                        if file_info.mtime < cutoff_timestamp:
-                            if self.storage.delete_file(
-                                client_id, device_id, f"frames/{file_info.name}"
-                            ):
-                                deleted_count += 1
-                    except Exception as e:
-                        logger.error(f"Error deleting frame {file_info.name}: {e}")
+            deleted_count += self._delete_old_frames(client_id, device_id, cutoff_timestamp)
 
         if deleted_count > 0:
             logger.debug(f"Cleaned up {deleted_count} old source frames")
+
+    def _delete_old_frames(self, client_id: str, device_id: str, cutoff_timestamp: float) -> int:
+        """
+        Delete one device's source frames older than the cutoff.
+
+        Returns:
+            Number of frames deleted
+        """
+        deleted_count = 0
+
+        for pattern in ("*.jpg", "*.jpeg", "*.png"):
+            for file_info in self.storage.list_files(
+                client_id, device_id, "frames", pattern=pattern
+            ):
+                try:
+                    if file_info.mtime < cutoff_timestamp and self.storage.delete_file(
+                        client_id, device_id, f"frames/{file_info.name}"
+                    ):
+                        deleted_count += 1
+                except Exception as e:
+                    logger.error(f"Error deleting frame {file_info.name}: {e}")
+
+        return deleted_count
