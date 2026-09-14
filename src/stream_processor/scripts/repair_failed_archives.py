@@ -56,16 +56,16 @@ from ..utils.logger import get_logger
 logger = get_logger(__name__)
 
 SELECT_FAILED = """
-    SELECT id, client_id, device_id, session_id, archive_path, segment_count,
-           started_at, ended_at, duration_seconds, expires_at
+    SELECT id, owner_client_id, device_id, session_id, archive_path,
+           segment_count, started_at, ended_at, duration_seconds, expires_at
     FROM deferred_transmissions
     WHERE status = 'failed'
     ORDER BY expires_at
     """
 
 SELECT_FAILED_BY_SESSION = """
-    SELECT id, client_id, device_id, session_id, archive_path, segment_count,
-           started_at, ended_at, duration_seconds, expires_at
+    SELECT id, owner_client_id, device_id, session_id, archive_path,
+           segment_count, started_at, ended_at, duration_seconds, expires_at
     FROM deferred_transmissions
     WHERE status = 'failed' AND session_id = ANY($1)
     ORDER BY expires_at
@@ -77,12 +77,16 @@ class Archive:
 
     def __init__(self, row, storage: StorageBackend):
         self.row = row
+        # Files live under owner_client_id, not client_id: a device shared with
+        # another client gets a row per client but one copy of the files, under
+        # the owner. The sibling repair scripts address storage the same way.
+        self.owner = row["owner_client_id"]
         self.has_playlist = storage.file_exists(
-            row["client_id"], row["device_id"], f"{row['archive_path']}/playlist.m3u8"
+            self.owner, row["device_id"], f"{row['archive_path']}/playlist.m3u8"
         )
         self.segments = list(
             storage.list_files(
-                row["client_id"],
+                self.owner,
                 row["device_id"],
                 f"{row['archive_path']}/segments",
                 pattern="*.ts",
@@ -124,6 +128,7 @@ class Archive:
             f"{state:<8} id={row['id']:<6} session={row['session_id']} "
             f"device={row['device_id']} {counted} segments{drift} "
             f"{self.bytes / 1e9:.2f} GB {row['duration_seconds']}s "
+            f"recorded {row['started_at']:%Y-%m-%d %H:%M}-{row['ended_at']:%H:%M} "
             f"expires {row['expires_at']:%Y-%m-%d}"
         )
 
@@ -186,11 +191,11 @@ async def discard(pool, storage: StorageBackend, archive: Archive) -> bool:
 
     for file_info in archive.segments:
         storage.delete_file(
-            row["client_id"],
+            archive.owner,
             row["device_id"],
             f"{row['archive_path']}/segments/{file_info.name}",
         )
-    storage.delete_file(row["client_id"], row["device_id"], f"{row['archive_path']}/playlist.m3u8")
+    storage.delete_file(archive.owner, row["device_id"], f"{row['archive_path']}/playlist.m3u8")
     return True
 
 
